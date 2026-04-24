@@ -6,12 +6,13 @@ from io import BytesIO
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
+from PIL import Image, ImageOps
 
 app = FastAPI(title="Face Head Cropper API")
 
 # Initialize InsightFace globally for performance
 face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app.prepare(ctx_id=0, det_size=(640, 640))
+face_app.prepare(ctx_id=0, det_size=(1280, 1280))
 
 def get_face_embedding(img):
     """Detects the largest face in a CV2 image and returns its embedding."""
@@ -53,11 +54,15 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
         original_bytes = await original.read()
         character_bytes = await character.read()
         
-        nparr_orig = np.frombuffer(original_bytes, np.uint8)
-        nparr_char = np.frombuffer(character_bytes, np.uint8)
-        
-        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
-        character_img = cv2.imdecode(nparr_char, cv2.IMREAD_COLOR)
+        # Use Pillow to handle EXIF orientation correctly
+        def load_image_correctly(data):
+            img_pil = Image.open(BytesIO(data))
+            img_pil = ImageOps.exif_transpose(img_pil)
+            img_cv2 = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            return img_cv2
+
+        original_img = load_image_correctly(original_bytes)
+        character_img = load_image_correctly(character_bytes)
         
         if original_img is None or character_img is None:
             raise HTTPException(status_code=400, detail="Invalid image format")

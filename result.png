@@ -1,0 +1,14 @@
+HTTP/2 526 
+date: Fri, 24 Apr 2026 14:18:52 GMT
+content-type: text/plain; charset=UTF-8
+content-length: 15
+set-cookie: cf_use_ob=0; Expires=Fri, 24 Apr 2026 14:19:22 GMT
+cache-control: private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0
+expires: Thu, 01 Jan 1970 00:00:01 GMT
+referrer-policy: same-origin
+x-frame-options: SAMEORIGIN
+server: cloudflare
+cf-ray: 9f15bcff5bdb34db-LAX
+alt-svc: h3=":443"; ma=86400
+
+error code: 526
