@@ -4,6 +4,11 @@ FROM ghcr.io/astral-sh/uv:python3.12-bookworm-slim AS builder
 # Set the working directory
 WORKDIR /app
 
+# Install build dependencies for insightface (needs g++ for cython extensions)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy the project files
 COPY pyproject.toml uv.lock ./
 
