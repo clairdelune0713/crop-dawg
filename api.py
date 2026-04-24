@@ -87,14 +87,19 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
             best_match = face
 
     if best_match is None:
+        print(f"Match failed. Best similarity found: {best_sim:.4f} (threshold: {threshold})")
         raise HTTPException(status_code=404, detail="Character not found in the original photo")
 
+    print(f"Match found! Similarity: {best_sim:.4f}. Cropping...")
     # Crop
     cropped_img = crop_head(original_img, best_match)
     
     # Encode to PNG
-    _, buffer = cv2.imencode('.png', cropped_img)
-    io_buf = BytesIO(buffer)
+    success, buffer = cv2.imencode('.png', cropped_img)
+    if not success:
+        raise HTTPException(status_code=500, detail="Could not encode result image")
+        
+    io_buf = BytesIO(buffer.tobytes())
     
     return StreamingResponse(io_buf, media_type="image/png")
 
