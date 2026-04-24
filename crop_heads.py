@@ -2,15 +2,12 @@ import os
 import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
-from PIL import Image, ImageOps
+from PIL import Image
 import glob
 
 def get_face_embedding(app, img_path):
     """Detects the largest face in an image and returns its embedding."""
-    img_pil = Image.open(img_path)
-    img_pil = ImageOps.exif_transpose(img_pil)
-    img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-    
+    img = cv2.imread(img_path)
     if img is None:
         print(f"Error: Could not read image {img_path}")
         return None
@@ -51,7 +48,7 @@ def crop_head(img, face, padding=0.6):
 def main():
     # Initialize InsightFace
     app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-    app.prepare(ctx_id=0, det_size=(1280, 1280))
+    app.prepare(ctx_id=0, det_size=(640, 640))
 
     # Define directories
     original_dir = 'original'
@@ -72,10 +69,7 @@ def main():
     
     original_path = original_files[0]
     print(f"Using original photo: {original_path}")
-    img_pil = Image.open(original_path)
-    img_pil = ImageOps.exif_transpose(img_pil)
-    original_img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-
+    original_img = cv2.imread(original_path)
     if original_img is None:
         print("Error: Could not read original image.")
         return

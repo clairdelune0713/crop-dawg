@@ -6,13 +6,12 @@ from io import BytesIO
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
-from PIL import Image, ImageOps
 
 app = FastAPI(title="Face Head Cropper API")
 
 # Initialize InsightFace globally for performance
 face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app.prepare(ctx_id=0, det_size=(1280, 1280))
+face_app.prepare(ctx_id=0, det_size=(640, 640))
 
 def get_face_embedding(img):
     """Detects the largest face in a CV2 image and returns its embedding."""
@@ -54,15 +53,11 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
         original_bytes = await original.read()
         character_bytes = await character.read()
         
-        # Use Pillow to handle EXIF orientation correctly
-        def load_image_correctly(data):
-            img_pil = Image.open(BytesIO(data))
-            img_pil = ImageOps.exif_transpose(img_pil)
-            img_cv2 = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-            return img_cv2
-
-        original_img = load_image_correctly(original_bytes)
-        character_img = load_image_correctly(character_bytes)
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        nparr_char = np.frombuffer(character_bytes, np.uint8)
+        
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        character_img = cv2.imdecode(nparr_char, cv2.IMREAD_COLOR)
         
         if original_img is None or character_img is None:
             raise HTTPException(status_code=400, detail="Invalid image format")
@@ -92,19 +87,14 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
             best_match = face
 
     if best_match is None:
-        print(f"Match failed. Best similarity found: {best_sim:.4f} (threshold: {threshold})")
         raise HTTPException(status_code=404, detail="Character not found in the original photo")
 
-    print(f"Match found! Similarity: {best_sim:.4f}. Cropping...")
     # Crop
     cropped_img = crop_head(original_img, best_match)
     
     # Encode to PNG
-    success, buffer = cv2.imencode('.png', cropped_img)
-    if not success:
-        raise HTTPException(status_code=500, detail="Could not encode result image")
-        
-    io_buf = BytesIO(buffer.tobytes())
+    _, buffer = cv2.imencode('.png', cropped_img)
+    io_buf = BytesIO(buffer)
     
     return StreamingResponse(io_buf, media_type="image/png")
 
