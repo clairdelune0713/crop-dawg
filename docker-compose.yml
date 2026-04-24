@@ -1,0 +1,12 @@
+services:
+  face-cropper:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./original:/app/original
+      - ./character:/app/character
+      - ./crops:/app/crops
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
