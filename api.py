@@ -10,14 +10,13 @@ from db import record_character_color, get_project_characters
 
 app = FastAPI(title="Face Head Cropper API")
 
-# Initialize InsightFace globally for performance
 # High-res model for complex scenes
 face_app_1280 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280))
+face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.4)
 
 # Standard model for portraits and fallback
 face_app_640 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app_640.prepare(ctx_id=0, det_size=(640, 640))
+face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.4)
 
 def get_face_embedding(img):
     """Detects the largest face in a CV2 image and returns its embedding."""
@@ -25,12 +24,12 @@ def get_face_embedding(img):
     print(f"[get_face_embedding] Input image size: {w}x{h}")
     
     # Try with 1280x1280
-    faces = face_app_1280.get(img, det_thresh=0.4)
+    faces = face_app_1280.get(img)
     
     # Fallback to 640x640
     if len(faces) == 0:
         print("[get_face_embedding] No face found at 1280x1280, trying 640x640...")
-        faces = face_app_640.get(img, det_thresh=0.4)
+        faces = face_app_640.get(img)
         
     if len(faces) == 0:
         print("[get_face_embedding] Still no face found after fallback.")
@@ -102,7 +101,7 @@ async def crop_character(
         raise HTTPException(status_code=400, detail="No face detected in the character portrait")
 
     # Detect all faces in original photo (Try 1280 first)
-    faces = face_app_1280.get(original_img, det_thresh=0.4)
+    faces = face_app_1280.get(original_img)
     
     def find_best_match(target_faces, ref_emb, label=""):
         best_m = None
@@ -135,7 +134,7 @@ async def crop_character(
     # If no match, try detecting faces in original at 640x640 (Fallback detection)
     if not is_match:
         print(f"[crop] No threshold met at 1280x1280 (Best: {best_sim:.4f}). Retrying original detection at 640x640...")
-        faces_640 = face_app_640.get(original_img, det_thresh=0.4)
+        faces_640 = face_app_640.get(original_img)
         if len(faces_640) > 0:
             m_640, s_640, ss_640 = find_best_match(faces_640, emb_ref, label="640x640 Fallback")
             
@@ -209,8 +208,8 @@ async def get_fill_image(
         return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
     # Detect faces in original photo (Try 1280 first)
-    faces_1280 = face_app_1280.get(original_img, det_thresh=0.4)
-    faces_640 = face_app_640.get(original_img, det_thresh=0.4)
+    faces_1280 = face_app_1280.get(original_img)
+    faces_640 = face_app_640.get(original_img)
     
     fill_img = original_img.copy()
     mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
