@@ -3,9 +3,10 @@ import cv2
 import numpy as np
 from insightface.app import FaceAnalysis
 from io import BytesIO
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
+from db import record_character_color
 
 app = FastAPI(title="Face Head Cropper API")
 
@@ -47,7 +48,12 @@ def crop_head(img, face, padding=0.6):
     return crop
 
 @app.post("/crop")
-async def crop_character(original: UploadFile = File(...), character: UploadFile = File(...)):
+async def crop_character(
+    original: UploadFile = File(...), 
+    character: UploadFile = File(...),
+    user_email: str = Form(None),
+    project_id: str = Form(None)
+):
     # Read files
     try:
         original_bytes = await original.read()
@@ -96,6 +102,11 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
     _, buffer = cv2.imencode('.png', cropped_img)
     io_buf = BytesIO(buffer)
     
+    # Record in DB if info provided
+    if user_email and project_id:
+        char_name = os.path.splitext(character.filename)[0] if character.filename else "unknown"
+        record_character_color(user_email, project_id, char_name)
+
     return StreamingResponse(io_buf, media_type="image/png")
 
 def main():

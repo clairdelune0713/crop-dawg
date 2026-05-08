@@ -84,12 +84,11 @@ def main():
     fill_img = original_img.copy()
     mask = np.zeros(original_img.shape[:2], dtype=np.uint8) # Track filled areas
     colors = [
-        (255, 0, 0),   # Blue (BGR)
-        (0, 255, 0),   # Green
-        (0, 0, 255),   # Red
-        (255, 255, 0), # Cyan
-        (255, 0, 255), # Magenta
+        (0, 0, 255),   # Red (BGR)
+        (255, 0, 0),   # Blue
         (0, 255, 255), # Yellow
+        (0, 255, 0),   # Green
+        (0, 165, 255), # Orange
     ]
     color_idx = 0
 
