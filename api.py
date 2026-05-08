@@ -12,7 +12,7 @@ app = FastAPI(title="Face Head Cropper API")
 
 # Initialize InsightFace globally for performance
 face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app.prepare(ctx_id=0, det_size=(640, 640))
+face_app.prepare(ctx_id=0, det_size=(1280, 1280))
 
 def get_face_embedding(img):
     """Detects the largest face in a CV2 image and returns its embedding."""
@@ -88,19 +88,28 @@ async def crop_character(
     if len(faces) == 0:
         raise HTTPException(status_code=404, detail="No faces detected in the original photo")
 
-    threshold = 0.3
+    threshold = 0.25
     best_match = None
     best_sim = -1
 
-    for face in faces:
+    print(f"Matching {character.filename} against {len(faces)} faces in original (det_size=1280)...")
+    for i, face in enumerate(faces):
         # Cosine similarity
         sim = np.dot(emb_ref, face.embedding) / (np.linalg.norm(emb_ref) * np.linalg.norm(face.embedding))
-        if sim > threshold and sim > best_sim:
+        print(f"  Face {i}: similarity = {sim:.4f}")
+        if sim > best_sim:
             best_sim = sim
             best_match = face
 
-    if best_match is None:
-        raise HTTPException(status_code=404, detail="Character not found in the original photo")
+    # Adaptive matching: If the best similarity is decent (>= 0.15) and significantly better than nothing, 
+    # or if it's above our standard threshold (0.25).
+    is_match = (best_sim >= threshold) or (len(faces) <= 2 and best_sim >= 0.18)
+    
+    if best_match is None or not is_match:
+        print(f"No match found for {character.filename}. Best sim was {best_sim:.4f}")
+        raise HTTPException(status_code=404, detail=f"Character not found in the original photo (Best sim: {best_sim:.4f})")
+
+    print(f"Found match for {character.filename} with sim: {best_sim:.4f}")
 
     # Crop
     cropped_img = crop_head(original_img, best_match)
@@ -158,20 +167,27 @@ async def get_fill_image(
 
     fill_img = original_img.copy()
     mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
-    threshold = 0.3
+    threshold = 0.25
 
+    print(f"Generating fill image for {len(characters)} characters...")
     for char in characters:
+        char_name = char['character_name']
         emb_stored = np.array(char['embedding'])
         best_match = None
         best_sim = -1
 
-        for face in original_faces:
+        print(f"  Matching {char_name} (det_size=1280)...")
+        for i, face in enumerate(original_faces):
             sim = np.dot(emb_stored, face.embedding) / (np.linalg.norm(emb_stored) * np.linalg.norm(face.embedding))
-            if sim > threshold and sim > best_sim:
+            if sim > best_sim:
                 best_sim = sim
                 best_match = face
+        
+        # Consistent adaptive matching logic
+        is_match = (best_sim >= threshold) or (len(original_faces) <= 2 and best_sim >= 0.18)
 
-        if best_match:
+        if best_match and is_match:
+            print(f"    Found match for {char_name} with sim: {best_sim:.4f}")
             nx1, ny1, nx2, ny2 = get_crop_coords(original_img, best_match)
             
             # Parse color_bgr string "(b,g,r)"
