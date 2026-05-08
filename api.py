@@ -253,10 +253,8 @@ async def get_fill_image(
             b, g, r = map(int, color_str.split(','))
             color_bgr = (b, g, r)
             
-            # Draw rectangle on fill image
-            cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, 3)
-            # Add character name label
-            cv2.putText(fill_img, char_name, (nx1, ny1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color_bgr, 2)
+            # Draw SOLID rectangle on fill image (thickness = -1)
+            cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
             # Fill mask
             cv2.rectangle(mask, (nx1, ny1), (nx2, ny2), 255, -1)
 
