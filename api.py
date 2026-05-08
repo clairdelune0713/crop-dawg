@@ -109,6 +109,7 @@ async def crop_character(
     threshold = 0.25
     best_match = None
     best_sim = -1
+    second_best_sim = -1
 
     print(f"Matching {character.filename} against {len(faces)} faces in original (det_size=1280)...")
     for i, face in enumerate(faces):
@@ -116,18 +117,25 @@ async def crop_character(
         sim = np.dot(emb_ref, face.embedding) / (np.linalg.norm(emb_ref) * np.linalg.norm(face.embedding))
         print(f"  Face {i}: similarity = {sim:.4f}")
         if sim > best_sim:
+            second_best_sim = best_sim
             best_sim = sim
             best_match = face
+        elif sim > second_best_sim:
+            second_best_sim = sim
 
-    # Adaptive matching: If the best similarity is decent (>= 0.15) and significantly better than nothing, 
-    # or if it's above our standard threshold (0.25).
-    is_match = (best_sim >= threshold) or (len(faces) <= 2 and best_sim >= 0.18)
+    # Adaptive matching logic:
+    # 1. Standard threshold (0.25)
+    # 2. Clear winner (0.20+ and at least 0.05 higher than 2nd best)
+    # 3. Simple scene (0.18+ and <= 2 faces total)
+    is_match = (best_sim >= threshold) or \
+               (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
+               (len(faces) <= 2 and best_sim >= 0.18)
     
     if best_match is None or not is_match:
-        print(f"No match found for {character.filename}. Best sim was {best_sim:.4f}")
+        print(f"No match found for {character.filename}. Best sim: {best_sim:.4f}, 2nd best: {second_best_sim:.4f}")
         raise HTTPException(status_code=404, detail=f"Character not found in the original photo (Best sim: {best_sim:.4f})")
 
-    print(f"Found match for {character.filename} with sim: {best_sim:.4f}")
+    print(f"Found match for {character.filename} with sim: {best_sim:.4f} (Winner gap: {best_sim - second_best_sim:.4f})")
 
     # Crop
     cropped_img = crop_head(original_img, best_match)
@@ -193,19 +201,25 @@ async def get_fill_image(
         emb_stored = np.array(char['embedding'])
         best_match = None
         best_sim = -1
+        second_best_sim = -1
 
         print(f"  Matching {char_name} (det_size=1280)...")
         for i, face in enumerate(original_faces):
             sim = np.dot(emb_stored, face.embedding) / (np.linalg.norm(emb_stored) * np.linalg.norm(face.embedding))
             if sim > best_sim:
+                second_best_sim = best_sim
                 best_sim = sim
                 best_match = face
+            elif sim > second_best_sim:
+                second_best_sim = sim
         
         # Consistent adaptive matching logic
-        is_match = (best_sim >= threshold) or (len(original_faces) <= 2 and best_sim >= 0.18)
+        is_match = (best_sim >= threshold) or \
+                   (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
+                   (len(original_faces) <= 2 and best_sim >= 0.18)
 
         if best_match and is_match:
-            print(f"    Found match for {char_name} with sim: {best_sim:.4f}")
+            print(f"    Found match for {char_name} with sim: {best_sim:.4f} (Winner gap: {best_sim - second_best_sim:.4f})")
             nx1, ny1, nx2, ny2 = get_crop_coords(original_img, best_match)
             
             # Parse color_bgr string "(b,g,r)"
