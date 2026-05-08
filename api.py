@@ -101,37 +101,50 @@ async def crop_character(
     if emb_ref is None:
         raise HTTPException(status_code=400, detail="No face detected in the character portrait")
 
-    # Detect all faces in original photo
+    # Detect all faces in original photo (Try 1280 first)
     faces = face_app_1280.get(original_img)
-    if len(faces) == 0:
-        raise HTTPException(status_code=404, detail="No faces detected in the original photo")
-
-    threshold = 0.25
-    best_match = None
-    best_sim = -1
-    second_best_sim = -1
-
-    print(f"Matching {character.filename} against {len(faces)} faces in original (det_size=1280)...")
-    for i, face in enumerate(faces):
-        # Cosine similarity
-        sim = np.dot(emb_ref, face.embedding) / (np.linalg.norm(emb_ref) * np.linalg.norm(face.embedding))
-        print(f"  Face {i}: similarity = {sim:.4f}")
-        if sim > best_sim:
-            second_best_sim = best_sim
-            best_sim = sim
-            best_match = face
-        elif sim > second_best_sim:
-            second_best_sim = sim
-
-    # Adaptive matching logic:
-    # 1. Standard threshold (0.25)
-    # 2. Clear winner (0.20+ and at least 0.05 higher than 2nd best)
-    # 3. Simple scene (0.18+ and <= 2 faces total)
-    is_match = (best_sim >= threshold) or \
-               (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
-               (len(faces) <= 2 and best_sim >= 0.18)
     
-    if best_match is None or not is_match:
+    def find_best_match(target_faces, ref_emb):
+        best_m = None
+        best_s = -1
+        second_s = -1
+        for i, face in enumerate(target_faces):
+            sim = np.dot(ref_emb, face.embedding) / (np.linalg.norm(ref_emb) * np.linalg.norm(face.embedding))
+            if sim > best_s:
+                second_s = best_s
+                best_s = sim
+                best_m = face
+            elif sim > second_s:
+                second_s = sim
+        return best_m, best_s, second_s
+
+    best_match, best_sim, second_best_sim = find_best_match(faces, emb_ref)
+    
+    # Check if we have a valid match
+    threshold = 0.25
+    is_match = (best_match is not None) and (
+        (best_sim >= threshold) or \
+        (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
+        (len(faces) <= 2 and best_sim >= 0.18)
+    )
+
+    # If no match, try detecting faces in original at 640x640 (Fallback detection)
+    if not is_match:
+        print(f"[crop] No match at 1280x1280 (Best: {best_sim:.4f}). Retrying original detection at 640x640...")
+        faces_640 = face_app_640.get(original_img)
+        if len(faces_640) > 0:
+            m_640, s_640, ss_640 = find_best_match(faces_640, emb_ref)
+            is_m_640 = (s_640 >= threshold) or \
+                       (s_640 >= 0.20 and s_640 > (ss_640 + 0.05)) or \
+                       (len(faces_640) <= 2 and s_640 >= 0.18)
+            
+            if is_m_640:
+                print(f"[crop] Found match in 640x640 fallback! Sim: {s_640:.4f}")
+                faces = faces_640
+                best_match, best_sim, second_best_sim = m_640, s_640, ss_640
+                is_match = True
+
+    if not is_match:
         print(f"No match found for {character.filename}. Best sim: {best_sim:.4f}, 2nd best: {second_best_sim:.4f}")
         raise HTTPException(status_code=404, detail=f"Character not found in the original photo (Best sim: {best_sim:.4f})")
 
@@ -184,42 +197,52 @@ async def get_fill_image(
         _, buffer = cv2.imencode('.png', original_img)
         return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
-    # Detect faces in original photo
-    original_faces = face_app_1280.get(original_img)
-    if len(original_faces) == 0:
-        # Return original image if no faces detected
-        _, buffer = cv2.imencode('.png', original_img)
-        return StreamingResponse(BytesIO(buffer), media_type="image/png")
-
+    # Detect faces in original photo (Try 1280 first)
+    faces_1280 = face_app_1280.get(original_img)
+    faces_640 = face_app_640.get(original_img)
+    
     fill_img = original_img.copy()
     mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
     threshold = 0.25
+
+    def find_best_match(target_faces, ref_emb):
+        best_m = None
+        best_s = -1
+        second_s = -1
+        for i, face in enumerate(target_faces):
+            sim = np.dot(ref_emb, face.embedding) / (np.linalg.norm(ref_emb) * np.linalg.norm(face.embedding))
+            if sim > best_s:
+                second_s = best_s
+                best_s = sim
+                best_m = face
+            elif sim > second_s:
+                second_s = sim
+        return best_m, best_s, second_s
 
     print(f"Generating fill image for {len(characters)} characters...")
     for char in characters:
         char_name = char['character_name']
         emb_stored = np.array(char['embedding'])
-        best_match = None
-        best_sim = -1
-        second_best_sim = -1
-
-        print(f"  Matching {char_name} (det_size=1280)...")
-        for i, face in enumerate(original_faces):
-            sim = np.dot(emb_stored, face.embedding) / (np.linalg.norm(emb_stored) * np.linalg.norm(face.embedding))
-            if sim > best_sim:
-                second_best_sim = best_sim
-                best_sim = sim
-                best_match = face
-            elif sim > second_best_sim:
-                second_best_sim = sim
         
-        # Consistent adaptive matching logic
-        is_match = (best_sim >= threshold) or \
-                   (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
-                   (len(original_faces) <= 2 and best_sim >= 0.18)
+        # Try matching with 1280 faces first
+        best_match, best_sim, second_best_sim = find_best_match(faces_1280, emb_stored)
+        is_match = (best_match is not None) and (
+            (best_sim >= threshold) or \
+            (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
+            (len(faces_1280) <= 2 and best_sim >= 0.18)
+        )
 
-        if best_match and is_match:
-            print(f"    Found match for {char_name} with sim: {best_sim:.4f} (Winner gap: {best_sim - second_best_sim:.4f})")
+        # Fallback to 640 faces if not matched
+        if not is_match and len(faces_640) > 0:
+            m_640, s_640, ss_640 = find_best_match(faces_640, emb_stored)
+            if (s_640 >= threshold) or \
+               (s_640 >= 0.20 and s_640 > (ss_640 + 0.05)) or \
+               (len(faces_640) <= 2 and s_640 >= 0.18):
+                best_match, best_sim, second_best_sim = m_640, s_640, ss_640
+                is_match = True
+
+        if is_match:
+            print(f"    Found match for {char_name} with sim: {best_sim:.4f}")
             nx1, ny1, nx2, ny2 = get_crop_coords(original_img, best_match)
             
             # Parse color_bgr string "(b,g,r)"
