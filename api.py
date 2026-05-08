@@ -6,7 +6,7 @@ from io import BytesIO
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
-from db import record_character_color
+from db import record_character_color, get_project_characters
 
 app = FastAPI(title="Face Head Cropper API")
 
@@ -23,8 +23,8 @@ def get_face_embedding(img):
     faces = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
     return faces[0].embedding
 
-def crop_head(img, face, padding=0.6):
-    """Crops the head from the image based on the face bounding box."""
+def get_crop_coords(img, face, padding=0.6):
+    """Calculates the coordinates for the head crop."""
     h, w, _ = img.shape
     bbox = face.bbox.astype(int)
     
@@ -44,6 +44,11 @@ def crop_head(img, face, padding=0.6):
     nx2 = int(min(w, cx + side // 2 * 0.8)) # Narrow horizontal margin
     ny2 = int(min(h, cy + side // 2 * 0.9)) # Include more of the bottom
     
+    return nx1, ny1, nx2, ny2
+
+def crop_head(img, face, padding=0.6):
+    """Crops the head from the image based on the face bounding box."""
+    nx1, ny1, nx2, ny2 = get_crop_coords(img, face, padding)
     crop = img[ny1:ny2, nx1:nx2]
     return crop
 
@@ -105,9 +110,76 @@ async def crop_character(
     # Record in DB if info provided
     if user_email and project_id:
         char_name = os.path.splitext(character.filename)[0] if character.filename else "unknown"
-        record_character_color(user_email, project_id, char_name)
+        record_character_color(user_email, project_id, char_name, embedding=emb_ref)
 
     return StreamingResponse(io_buf, media_type="image/png")
+
+@app.post("/fill-image")
+async def get_fill_image(
+    original: UploadFile = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...)
+):
+    # Read original image
+    try:
+        original_bytes = await original.read()
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise HTTPException(status_code=400, detail="Invalid image format")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+
+    # Get all characters for this project
+    characters = get_project_characters(user_email, project_id)
+    if not characters:
+        # Return original image if no characters found
+        _, buffer = cv2.imencode('.png', original_img)
+        return StreamingResponse(BytesIO(buffer), media_type="image/png")
+
+    # Detect faces in original photo
+    original_faces = face_app.get(original_img)
+    if len(original_faces) == 0:
+        # Return original image if no faces detected
+        _, buffer = cv2.imencode('.png', original_img)
+        return StreamingResponse(BytesIO(buffer), media_type="image/png")
+
+    fill_img = original_img.copy()
+    mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
+    threshold = 0.3
+
+    for char in characters:
+        emb_stored = np.array(char['embedding'])
+        best_match = None
+        best_sim = -1
+
+        for face in original_faces:
+            sim = np.dot(emb_stored, face.embedding) / (np.linalg.norm(emb_stored) * np.linalg.norm(face.embedding))
+            if sim > threshold and sim > best_sim:
+                best_sim = sim
+                best_match = face
+
+        if best_match:
+            nx1, ny1, nx2, ny2 = get_crop_coords(original_img, best_match)
+            
+            # Parse color_bgr string "(b,g,r)"
+            color_str = char['color_bgr'].strip('()')
+            color = tuple(map(int, color_str.split(',')))
+            
+            # Create a mask for the current rectangle
+            current_rect_mask = np.zeros_like(mask)
+            cv2.rectangle(current_rect_mask, (nx1, ny1), (nx2, ny2), 255, -1)
+            
+            # Only draw where the global mask is empty
+            draw_mask = cv2.bitwise_and(current_rect_mask, cv2.bitwise_not(mask))
+            fill_img[draw_mask > 0] = color
+            
+            # Update global mask
+            mask = cv2.bitwise_or(mask, current_rect_mask)
+
+    # Encode to PNG
+    _, buffer = cv2.imencode('.png', fill_img)
+    return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
 def main():
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -46,16 +46,26 @@ def init_db():
                 color_name TEXT NOT NULL,
                 color_hex TEXT NOT NULL,
                 color_bgr TEXT NOT NULL,
+                embedding FLOAT[],
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(user_email, project_id, character_name)
             );
+        """)
+        # Add embedding column if it doesn't exist (for existing databases)
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='embedding') THEN
+                    ALTER TABLE character_colors ADD COLUMN embedding FLOAT[];
+                END IF;
+            END $$;
         """)
         conn.commit()
     finally:
         cur.close()
         conn.close()
 
-def record_character_color(user_email, project_id, character_name):
+def record_character_color(user_email, project_id, character_name, embedding=None):
     """
     Records the character color mapping. Assigns the next available color from the palette.
     If the character already has a color for this project, it returns that mapping.
@@ -89,14 +99,32 @@ def record_character_color(user_email, project_id, character_name):
         bgr_str = f"({color['bgr'][0]},{color['bgr'][1]},{color['bgr'][2]})"
         
         cur.execute("""
-            INSERT INTO character_colors (user_email, project_id, character_name, color_name, color_hex, color_bgr)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            INSERT INTO character_colors (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING color_name, color_hex, color_bgr
-        """, (user_email, project_id, character_name, color['name'], color['hex'], bgr_str))
+        """, (user_email, project_id, character_name, color['name'], color['hex'], bgr_str, embedding.tolist() if embedding is not None else None))
         
         result = cur.fetchone()
         conn.commit()
         return result
+    finally:
+        cur.close()
+        conn.close()
+
+def get_project_characters(user_email, project_id):
+    """Retrieves all registered characters for a specific project."""
+    if not user_email or not project_id:
+        return []
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT character_name, color_name, color_hex, color_bgr, embedding 
+            FROM character_colors 
+            WHERE user_email = %s AND project_id = %s
+        """, (user_email, project_id))
+        return cur.fetchall()
     finally:
         cur.close()
         conn.close()
