@@ -2,7 +2,7 @@ services:
   face-cropper:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:35013:8000"
     volumes:
       - ./original:/app/original
       - ./character:/app/character
