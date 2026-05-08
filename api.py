@@ -38,10 +38,10 @@ def crop_head(img, face, padding=0.6):
     # Head crop usually needs more top padding
     side = max(fw, fh) * (1 + padding)
     
-    nx1 = int(max(0, cx - side // 2))
+    nx1 = int(max(0, cx - side // 2 * 0.8)) # Narrow horizontal margin
     ny1 = int(max(0, cy - side // 2 * 1.3)) # Shift up for head
-    nx2 = int(min(w, cx + side // 2))
-    ny2 = int(min(h, cy + side // 2 * 0.7)) # Shift up
+    nx2 = int(min(w, cx + side // 2 * 0.8)) # Narrow horizontal margin
+    ny2 = int(min(h, cy + side // 2 * 0.9)) # Include more of the bottom
     
     crop = img[ny1:ny2, nx1:nx2]
     return crop
@@ -75,7 +75,7 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
     if len(faces) == 0:
         raise HTTPException(status_code=404, detail="No faces detected in the original photo")
 
-    threshold = 0.4
+    threshold = 0.3
     best_match = None
     best_sim = -1
 
