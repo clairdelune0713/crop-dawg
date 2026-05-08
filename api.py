@@ -11,14 +11,32 @@ from db import record_character_color, get_project_characters
 app = FastAPI(title="Face Head Cropper API")
 
 # Initialize InsightFace globally for performance
-face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app.prepare(ctx_id=0, det_size=(1280, 1280))
+# High-res model for complex scenes
+face_app_1280 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280))
+
+# Standard model for portraits and fallback
+face_app_640 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_640.prepare(ctx_id=0, det_size=(640, 640))
 
 def get_face_embedding(img):
     """Detects the largest face in a CV2 image and returns its embedding."""
-    faces = face_app.get(img)
+    h, w, _ = img.shape
+    print(f"[get_face_embedding] Input image size: {w}x{h}")
+    
+    # Try with 1280x1280
+    faces = face_app_1280.get(img)
+    
+    # Fallback to 640x640
     if len(faces) == 0:
+        print("[get_face_embedding] No face found at 1280x1280, trying 640x640...")
+        faces = face_app_640.get(img)
+        
+    if len(faces) == 0:
+        print("[get_face_embedding] Still no face found after fallback.")
         return None
+        
+    print(f"[get_face_embedding] Found {len(faces)} faces. Selecting largest.")
     # Sort by bbox area to find the main character (largest face)
     faces = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
     return faces[0].embedding
@@ -84,7 +102,7 @@ async def crop_character(
         raise HTTPException(status_code=400, detail="No face detected in the character portrait")
 
     # Detect all faces in original photo
-    faces = face_app.get(original_img)
+    faces = face_app_1280.get(original_img)
     if len(faces) == 0:
         raise HTTPException(status_code=404, detail="No faces detected in the original photo")
 
@@ -159,7 +177,7 @@ async def get_fill_image(
         return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
     # Detect faces in original photo
-    original_faces = face_app.get(original_img)
+    original_faces = face_app_1280.get(original_img)
     if len(original_faces) == 0:
         # Return original image if no faces detected
         _, buffer = cv2.imencode('.png', original_img)
