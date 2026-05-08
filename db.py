@@ -47,16 +47,24 @@ def init_db():
                 color_hex TEXT NOT NULL,
                 color_bgr TEXT NOT NULL,
                 embedding FLOAT[],
+                storyboard_number INTEGER,
+                grid_number INTEGER,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(user_email, project_id, character_name)
             );
         """)
-        # Add embedding column if it doesn't exist (for existing databases)
+        # Add new columns if they don't exist
         cur.execute("""
             DO $$ 
             BEGIN 
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='embedding') THEN
                     ALTER TABLE character_colors ADD COLUMN embedding FLOAT[];
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='storyboard_number') THEN
+                    ALTER TABLE character_colors ADD COLUMN storyboard_number INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='grid_number') THEN
+                    ALTER TABLE character_colors ADD COLUMN grid_number INTEGER;
                 END IF;
             END $$;
         """)
@@ -65,7 +73,7 @@ def init_db():
         cur.close()
         conn.close()
 
-def record_character_color(user_email, project_id, character_name, embedding=None):
+def record_character_color(user_email, project_id, character_name, embedding=None, storyboard_number=None, grid_number=None):
     """
     Records the character color mapping. Assigns the next available color from the palette.
     If the character already has a color for this project, it returns that mapping.
@@ -99,10 +107,15 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
         bgr_str = f"({color['bgr'][0]},{color['bgr'][1]},{color['bgr'][2]})"
         
         cur.execute("""
-            INSERT INTO character_colors (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO character_colors (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding, storyboard_number, grid_number)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING color_name, color_hex, color_bgr
-        """, (user_email, project_id, character_name, color['name'], color['hex'], bgr_str, embedding.tolist() if embedding is not None else None))
+        """, (
+            user_email, project_id, character_name, 
+            color['name'], color['hex'], bgr_str, 
+            embedding.tolist() if embedding is not None else None,
+            storyboard_number, grid_number
+        ))
         
         result = cur.fetchone()
         conn.commit()
@@ -111,19 +124,29 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
         cur.close()
         conn.close()
 
-def get_project_characters(user_email, project_id):
-    """Retrieves all registered characters for a specific project."""
+def get_project_characters(user_email, project_id, storyboard_number=None, grid_number=None):
+    """Retrieves all registered characters for a specific project, optionally filtered by storyboard/grid."""
     if not user_email or not project_id:
         return []
 
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("""
+        query = """
             SELECT character_name, color_name, color_hex, color_bgr, embedding 
             FROM character_colors 
             WHERE user_email = %s AND project_id = %s
-        """, (user_email, project_id))
+        """
+        params = [user_email, project_id]
+        
+        if storyboard_number is not None:
+            query += " AND storyboard_number = %s"
+            params.append(storyboard_number)
+        if grid_number is not None:
+            query += " AND grid_number = %s"
+            params.append(grid_number)
+            
+        cur.execute(query, tuple(params))
         return cur.fetchall()
     finally:
         cur.close()

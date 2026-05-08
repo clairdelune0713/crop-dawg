@@ -56,8 +56,10 @@ def crop_head(img, face, padding=0.6):
 async def crop_character(
     original: UploadFile = File(...), 
     character: UploadFile = File(...),
-    user_email: str = Form(None),
-    project_id: str = Form(None)
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...)
 ):
     # Read files
     try:
@@ -107,10 +109,14 @@ async def crop_character(
     _, buffer = cv2.imencode('.png', cropped_img)
     io_buf = BytesIO(buffer)
     
-    # Record in DB if info provided
-    if user_email and project_id:
-        char_name = os.path.splitext(character.filename)[0] if character.filename else "unknown"
-        record_character_color(user_email, project_id, char_name, embedding=emb_ref)
+    # Record in DB (All info is now required)
+    char_name = os.path.splitext(character.filename)[0] if character.filename else "unknown"
+    record_character_color(
+        user_email, project_id, char_name, 
+        embedding=emb_ref, 
+        storyboard_number=storyboard_number, 
+        grid_number=grid_number
+    )
 
     return StreamingResponse(io_buf, media_type="image/png")
 
@@ -118,7 +124,9 @@ async def crop_character(
 async def get_fill_image(
     original: UploadFile = File(...),
     user_email: str = Form(...),
-    project_id: str = Form(...)
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...)
 ):
     # Read original image
     try:
@@ -130,8 +138,12 @@ async def get_fill_image(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
 
-    # Get all characters for this project
-    characters = get_project_characters(user_email, project_id)
+    # Get all characters for this project, optionally filtered by storyboard/grid
+    characters = get_project_characters(
+        user_email, project_id, 
+        storyboard_number=storyboard_number, 
+        grid_number=grid_number
+    )
     if not characters:
         # Return original image if no characters found
         _, buffer = cv2.imencode('.png', original_img)

@@ -46,8 +46,10 @@ Identifies a character in an original photo based on a reference portrait and re
 | :--- | :--- | :--- |
 | `original` | File | The original long-shot image (JPG, PNG, WebP). |
 | `character` | File | The reference portrait of the person to crop. |
-| `user_email` | String | (Optional) Email to track character ownership. |
-| `project_id` | String | (Optional) Unique ID for the project to group characters. |
+| `user_email` | String | (Required) Email to track character ownership. |
+| `project_id` | String | (Required) Unique ID for the project. |
+| `storyboard_number` | Integer | (Required) Storyboard index for the scene. |
+| `grid_number` | Integer | (Required) Grid index within the storyboard. |
 
 **Response**:
 - **Success (200)**: Returns the cropped image file directly as a PNG.
@@ -60,6 +62,8 @@ curl -X POST "http://localhost:8000/crop" \
   -F "character=@character/Cousin_Sean-0331.png" \
   -F "user_email=test@example.com" \
   -F "project_id=project_001" \
+  -F "storyboard_number=1" \
+  -F "grid_number=4" \
   --output result.png
 ```
 
@@ -74,7 +78,9 @@ files = {
 }
 data = {
     'user_email': 'test@example.com',
-    'project_id': 'project_001'
+    'project_id': 'project_001',
+    'storyboard_number': 1,
+    'grid_number': 4
 }
 
 response = requests.post(url, files=files, data=data)
@@ -97,6 +103,8 @@ Returns the original image with colored rectangles covering all characters that 
 | `original` | File | The original long-shot image. |
 | `user_email` | String | (Required) User email. |
 | `project_id` | String | (Required) Project ID. |
+| `storyboard_number` | Integer | (Required) Storyboard index to visualize. |
+| `grid_number` | Integer | (Required) Grid index to visualize. |
 
 **Response**:
 - **Success (200)**: Returns the visualization image directly as a PNG.
@@ -107,6 +115,8 @@ curl -X POST "http://localhost:8000/fill-image" \
   -F "original=@original/ss.png" \
   -F "user_email=test@example.com" \
   -F "project_id=project_001" \
+  -F "storyboard_number=1" \
+  -F "grid_number=4" \
   --output fill_status.png
 ```
 
