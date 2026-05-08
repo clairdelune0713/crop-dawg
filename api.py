@@ -63,6 +63,26 @@ def get_crop_coords(img, face, padding=0.6):
     
     return nx1, ny1, nx2, ny2
 
+def find_best_match(target_faces, ref_emb, label=""):
+    """Finds the best matching face among candidates."""
+    best_m = None
+    best_s = -1
+    second_s = -1
+    if label:
+        print(f"  [Matching {label}] against {len(target_faces)} faces:")
+    for i, face in enumerate(target_faces):
+        # Cosine similarity
+        sim = np.dot(ref_emb, face.embedding) / (np.linalg.norm(ref_emb) * np.linalg.norm(face.embedding))
+        if label:
+            print(f"    Face {i}: similarity = {sim:.4f}")
+        if sim > best_s:
+            second_s = best_s
+            best_s = sim
+            best_m = face
+        elif sim > second_s:
+            second_s = sim
+    return best_m, best_s, second_s
+
 def crop_head(img, face, padding=0.6):
     """Crops the head from the image based on the face bounding box."""
     nx1, ny1, nx2, ny2 = get_crop_coords(img, face, padding)
@@ -103,24 +123,6 @@ async def crop_character(
     # Detect all faces in original photo (Try 1280 first)
     faces = face_app_1280.get(original_img)
     
-    def find_best_match(target_faces, ref_emb, label=""):
-        best_m = None
-        best_s = -1
-        second_s = -1
-        if label:
-            print(f"  [Matching {label}] against {len(target_faces)} faces:")
-        for i, face in enumerate(target_faces):
-            sim = np.dot(ref_emb, face.embedding) / (np.linalg.norm(ref_emb) * np.linalg.norm(face.embedding))
-            if label:
-                print(f"    Face {i}: similarity = {sim:.4f}")
-            if sim > best_s:
-                second_s = best_s
-                best_s = sim
-                best_m = face
-            elif sim > second_s:
-                second_s = sim
-        return best_m, best_s, second_s
-
     best_match, best_sim, second_best_sim = find_best_match(faces, emb_ref, label="1280x1280")
     
     # Check if we have a valid match
@@ -192,7 +194,7 @@ async def get_fill_image(
         nparr_orig = np.frombuffer(original_bytes, np.uint8)
         original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
         if original_img is None:
-            raise HTTPException(status_code=400, detail="Invalid image format")
+            raise HTTPException(status_code=400, detail="Invalid original image")
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
 
@@ -214,20 +216,6 @@ async def get_fill_image(
     fill_img = original_img.copy()
     mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
     threshold = 0.25
-
-    def find_best_match(target_faces, ref_emb):
-        best_m = None
-        best_s = -1
-        second_s = -1
-        for i, face in enumerate(target_faces):
-            sim = np.dot(ref_emb, face.embedding) / (np.linalg.norm(ref_emb) * np.linalg.norm(face.embedding))
-            if sim > best_s:
-                second_s = best_s
-                best_s = sim
-                best_m = face
-            elif sim > second_s:
-                second_s = sim
-        return best_m, best_s, second_s
 
     print(f"Generating fill image for {len(characters)} characters...")
     for char in characters:
@@ -262,25 +250,19 @@ async def get_fill_image(
             
             # Parse color_bgr string "(b,g,r)"
             color_str = char['color_bgr'].strip('()')
-            color = tuple(map(int, color_str.split(',')))
+            b, g, r = map(int, color_str.split(','))
+            color_bgr = (b, g, r)
             
-            # Create a mask for the current rectangle
-            current_rect_mask = np.zeros_like(mask)
-            cv2.rectangle(current_rect_mask, (nx1, ny1), (nx2, ny2), 255, -1)
-            
-            # Only draw where the global mask is empty
-            draw_mask = cv2.bitwise_and(current_rect_mask, cv2.bitwise_not(mask))
-            fill_img[draw_mask > 0] = color
-            
-            # Update global mask
-            mask = cv2.bitwise_or(mask, current_rect_mask)
+            # Draw rectangle on fill image
+            cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, 3)
+            # Add character name label
+            cv2.putText(fill_img, char_name, (nx1, ny1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color_bgr, 2)
+            # Fill mask
+            cv2.rectangle(mask, (nx1, ny1), (nx2, ny2), 255, -1)
 
-    # Encode to PNG
+    # Encode result
     _, buffer = cv2.imencode('.png', fill_img)
     return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
-def main():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
 if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
