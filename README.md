@@ -46,6 +46,8 @@ Identifies a character in an original photo based on a reference portrait and re
 | :--- | :--- | :--- |
 | `original` | File | The original long-shot image (JPG, PNG, WebP). |
 | `character` | File | The reference portrait of the person to crop. |
+| `user_email` | String | (Optional) Email to track character ownership. |
+| `project_id` | String | (Optional) Unique ID for the project to group characters. |
 
 **Response**:
 - **Success (200)**: Returns the cropped image file directly as a PNG.
@@ -56,6 +58,8 @@ Identifies a character in an original photo based on a reference portrait and re
 curl -X POST "http://localhost:8000/crop" \
   -F "original=@original/ss.png" \
   -F "character=@character/Cousin_Sean-0331.png" \
+  -F "user_email=test@example.com" \
+  -F "project_id=project_001" \
   --output result.png
 ```
 
@@ -68,14 +72,42 @@ files = {
     'original': open('original/ss.png', 'rb'),
     'character': open('character/Cousin_Sean-0331.png', 'rb')
 }
+data = {
+    'user_email': 'test@example.com',
+    'project_id': 'project_001'
+}
 
-response = requests.post(url, files=files)
+response = requests.post(url, files=files, data=data)
 
 if response.status_code == 200:
     with open('output.png', 'wb') as f:
         f.write(response.content)
 else:
     print(f"Error: {response.json()['detail']}")
+```
+
+### 2. Get Fill Image
+**Endpoint**: `POST /fill-image`
+
+Returns the original image with colored rectangles covering all characters that have been cropped for the given project. This endpoint uses stored facial embeddings and does not require reference portraits.
+
+**Request (Multipart/Form-Data)**:
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `original` | File | The original long-shot image. |
+| `user_email` | String | (Required) User email. |
+| `project_id` | String | (Required) Project ID. |
+
+**Response**:
+- **Success (200)**: Returns the visualization image directly as a PNG.
+
+**Example using `curl`**:
+```bash
+curl -X POST "http://localhost:8000/fill-image" \
+  -F "original=@original/ss.png" \
+  -F "user_email=test@example.com" \
+  -F "project_id=project_001" \
+  --output fill_status.png
 ```
 
 ---
