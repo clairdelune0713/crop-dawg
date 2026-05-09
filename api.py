@@ -12,11 +12,16 @@ from db import record_character_color, get_project_characters, clear_grid_charac
 
 app = FastAPI(title="Face Head Cropper API")
 
-# High-res model for complex scenes
-face_app_1280 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.1) # Very low thresh to catch everything
+# High-res models for different scales
+face_app_1600 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_1600.prepare(ctx_id=0, det_size=(1600, 1600), det_thresh=0.1)
 
-# Standard model for portraits and fallback
+face_app_1280 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.1)
+
+face_app_960 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_960.prepare(ctx_id=0, det_size=(960, 960), det_thresh=0.1)
+
 face_app_640 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
 face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.1)
 
@@ -242,9 +247,15 @@ async def crop_multi(
             
         # 1. Detect all faces in original (Exhaustive)
         all_faces = []
-        scales = [(1280, 1280), (960, 960), (640, 640)]
-        for sw, sh in scales:
-            app = face_app_1280 if sw > 640 else face_app_640
+        apps = [
+            (face_app_1600, "1600"),
+            (face_app_1280, "1280"),
+            (face_app_960,  "960"),
+            (face_app_640,  "640")
+        ]
+        
+        for app, label in apps:
+            print(f"[crop] Detecting faces at {label}x{label}...")
             curr_faces = app.get(original_img)
             all_faces.extend(curr_faces)
 
@@ -255,11 +266,15 @@ async def crop_multi(
             x2 = min(box1[2], box2[2])
             y2 = min(box1[3], box2[3])
             inter = max(0, x2 - x1) * max(0, y2 - y1)
-            return inter / ((box1[2]-box1[0])*(box1[3]-box1[1]) + (box2[2]-box2[0])*(box2[3]-box2[1]) - inter)
+            area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+            area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+            denom = (area1 + area2 - inter)
+            return inter / denom if denom > 0 else 0
 
         unique_faces = []
+        all_faces.sort(key=lambda x: x.det_score, reverse=True)
         for f in all_faces:
-            if not any(get_iou(f.bbox, uf.bbox) > 0.5 for uf in unique_faces):
+            if not any(get_iou(f.bbox, uf.bbox) > 0.7 for uf in unique_faces):
                 unique_faces.append(f)
         
         if not unique_faces:
