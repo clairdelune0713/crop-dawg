@@ -268,10 +268,22 @@ async def get_fill_image(
             cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
             # Fill mask
             cv2.rectangle(mask, (nx1, ny1), (nx2, ny2), 255, -1)
-
     # Encode result
     _, buffer = cv2.imencode('.png', fill_img)
     return StreamingResponse(BytesIO(buffer), media_type="image/png")
+
+@app.post("/clear-grid")
+async def clear_grid(
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...)
+):
+    try:
+        clear_grid_characters(user_email, project_id, storyboard_number, grid_number)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

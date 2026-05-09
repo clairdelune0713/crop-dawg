@@ -172,3 +172,20 @@ def get_project_characters(user_email, project_id, storyboard_number=None, grid_
 if __name__ == "__main__":
     init_db()
     print("Database initialized.")
+def clear_grid_characters(user_email, project_id, storyboard_number, grid_number):
+    """Deletes all character records for a specific grid to allow for a clean re-enhancement."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            DELETE FROM character_colors
+            WHERE user_email = %s 
+              AND project_id = %s 
+              AND storyboard_number = %s 
+              AND grid_number = %s
+        """, (user_email, project_id, storyboard_number, grid_number))
+        conn.commit()
+        return True
+    finally:
+        cur.close()
+        conn.close()
