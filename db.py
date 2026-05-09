@@ -49,6 +49,10 @@ def init_db():
                 embedding FLOAT[],
                 storyboard_number INTEGER,
                 grid_number INTEGER,
+                nx1 INTEGER,
+                ny1 INTEGER,
+                nx2 INTEGER,
+                ny2 INTEGER,
                 created_at TIMESTAMPTZ DEFAULT NOW(),
                 UNIQUE(user_email, project_id, character_name)
             );
@@ -66,6 +70,18 @@ def init_db():
                 IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='grid_number') THEN
                     ALTER TABLE character_colors ADD COLUMN grid_number INTEGER;
                 END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='nx1') THEN
+                    ALTER TABLE character_colors ADD COLUMN nx1 INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='ny1') THEN
+                    ALTER TABLE character_colors ADD COLUMN ny1 INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='nx2') THEN
+                    ALTER TABLE character_colors ADD COLUMN nx2 INTEGER;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='character_colors' AND column_name='ny2') THEN
+                    ALTER TABLE character_colors ADD COLUMN ny2 INTEGER;
+                END IF;
             END $$;
         """)
         conn.commit()
@@ -73,7 +89,7 @@ def init_db():
         cur.close()
         conn.close()
 
-def record_character_color(user_email, project_id, character_name, embedding=None, storyboard_number=None, grid_number=None):
+def record_character_color(user_email, project_id, character_name, embedding=None, storyboard_number=None, grid_number=None, nx1=None, ny1=None, nx2=None, ny2=None):
     """
     Records the character color mapping. Assigns the next available color from the palette.
     If the character already has a color for this project, it returns that mapping.
@@ -107,14 +123,15 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
         bgr_str = f"({color['bgr'][0]},{color['bgr'][1]},{color['bgr'][2]})"
         
         cur.execute("""
-            INSERT INTO character_colors (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding, storyboard_number, grid_number)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO character_colors (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding, storyboard_number, grid_number, nx1, ny1, nx2, ny2)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING color_name, color_hex, color_bgr
         """, (
             user_email, project_id, character_name, 
             color['name'], color['hex'], bgr_str, 
             embedding.tolist() if embedding is not None else None,
-            storyboard_number, grid_number
+            storyboard_number, grid_number,
+            nx1, ny1, nx2, ny2
         ))
         
         result = cur.fetchone()
@@ -133,7 +150,7 @@ def get_project_characters(user_email, project_id, storyboard_number=None, grid_
     cur = conn.cursor()
     try:
         query = """
-            SELECT character_name, color_name, color_hex, color_bgr, embedding 
+            SELECT character_name, color_name, color_hex, color_bgr, embedding, nx1, ny1, nx2, ny2
             FROM character_colors 
             WHERE user_email = %s AND project_id = %s
         """

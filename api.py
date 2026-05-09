@@ -169,13 +169,17 @@ async def crop_character(
     _, buffer = cv2.imencode('.png', cropped_img)
     io_buf = BytesIO(buffer)
     
+    # Calculate crop coordinates for DB
+    nx1, ny1, nx2, ny2 = get_crop_coords(original_img, best_match)
+    
     # Record in DB (All info is now required)
     char_name = os.path.splitext(character.filename)[0] if character.filename else "unknown"
     record_character_color(
         user_email, project_id, char_name, 
         embedding=emb_ref, 
         storyboard_number=storyboard_number, 
-        grid_number=grid_number
+        grid_number=grid_number,
+        nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2)
     )
 
     return StreamingResponse(io_buf, media_type="image/png")
