@@ -174,6 +174,7 @@ if __name__ == "__main__":
     print("Database initialized.")
 def clear_grid_characters(user_email, project_id, storyboard_number, grid_number):
     """Deletes all character records for a specific grid to allow for a clean re-enhancement."""
+    print(f"[DB] Clearing records for {user_email}/{project_id} | S{storyboard_number}-G{grid_number}")
     conn = get_db_connection()
     cur = conn.cursor()
     try:
@@ -184,7 +185,9 @@ def clear_grid_characters(user_email, project_id, storyboard_number, grid_number
               AND storyboard_number = %s 
               AND grid_number = %s
         """, (user_email, project_id, storyboard_number, grid_number))
+        count = cur.rowcount
         conn.commit()
+        print(f"[DB] Deleted {count} stale character records.")
         return True
     finally:
         cur.close()

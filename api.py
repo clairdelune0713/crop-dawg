@@ -6,7 +6,7 @@ from io import BytesIO
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse
 import uvicorn
-from db import record_character_color, get_project_characters
+from db import record_character_color, get_project_characters, clear_grid_characters
 
 app = FastAPI(title="Face Head Cropper API")
 
