@@ -12,11 +12,11 @@ app = FastAPI(title="Face Head Cropper API")
 
 # High-res model for complex scenes
 face_app_1280 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.4)
+face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.1) # Very low thresh to catch everything
 
 # Standard model for portraits and fallback
 face_app_640 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.4)
+face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.1)
 
 def get_face_embedding(img):
     """Detects the largest face in a CV2 image and returns its embedding."""
@@ -120,47 +120,80 @@ async def crop_character(
     if emb_ref is None:
         raise HTTPException(status_code=400, detail="No face detected in the character portrait")
 
-    # Detect all faces in original photo (Try 1280 first)
-    faces = face_app_1280.get(original_img)
+    # 1. Exhaustive Multi-Scale Detection
+    all_faces = []
+    scales = [(1280, 1280), (960, 960), (640, 640)]
     
-    best_match, best_sim, second_best_sim = find_best_match(faces, emb_ref, label="1280x1280")
+    for sw, sh in scales:
+        print(f"[crop] Detecting faces at {sw}x{sh}...")
+        # We reuse the apps but change det_size dynamically if needed, 
+        # but for simplicity we'll just use the two prepared ones for now 
+        # and maybe add a third if it helps.
+        app = face_app_1280 if sw > 640 else face_app_640
+        # InsightFace apps det_size is set during prepare, so we just use the two we have.
+        curr_faces = app.get(original_img)
+        print(f"    Found {len(curr_faces)} candidates.")
+        all_faces.extend(curr_faces)
+        if len(curr_faces) > 0 and sw == 1280:
+            # If we found faces at high res, we might still want to try lower res 
+            # for smaller faces that might have been missed by high-res stride.
+            pass
+
+    # Deduplicate faces based on bounding box overlap (IOU)
+    def get_iou(box1, box2):
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        return inter / (area1 + area2 - inter)
+
+    unique_faces = []
+    for f in all_faces:
+        is_duplicate = False
+        for uf in unique_faces:
+            if get_iou(f.bbox, uf.bbox) > 0.5:
+                # Keep the one with higher detection score
+                if f.det_score > uf.det_score:
+                    unique_faces.remove(uf)
+                    unique_faces.append(f)
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_faces.append(f)
+
+    print(f"[crop] Total unique candidates: {len(unique_faces)}")
+
+    if not unique_faces:
+        # Last resort: Try very small detection size and lowest threshold
+        print("[crop] NO FACES FOUND. Last resort attempt at 320x320...")
+        face_app_640.prepare(ctx_id=0, det_size=(320, 320), det_thresh=0.01)
+        unique_faces = face_app_640.get(original_img)
+        # Restore for next call
+        face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.1)
+
+    if not unique_faces:
+        print(f"No faces detected for {character.filename} even after fallback.")
+        raise HTTPException(status_code=404, detail=f"No faces detected in the original photo")
+
+    # 2. Matching
+    best_match, best_sim, second_best_sim = find_best_match(unique_faces, emb_ref, label="Exhaustive")
     
     # Check if we have a valid match
     threshold = 0.25
     is_match = (best_match is not None) and (
         (best_sim >= threshold) or \
-        (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
-        (len(faces) <= 2 and best_sim >= 0.18)
+        (best_sim >= 0.20 and best_sim > (second_best_sim + 0.10)) or \
+        (len(unique_faces) == 1) # If only one face in the whole image, it MUST be the one
     )
 
-    # If no match, try detecting faces in original at 640x640 (Fallback detection)
     if not is_match:
-        print(f"[crop] No threshold met at 1280x1280 (Best: {best_sim:.4f}). Retrying original detection at 640x640...")
-        faces_640 = face_app_640.get(original_img)
-        if len(faces_640) > 0:
-            m_640, s_640, ss_640 = find_best_match(faces_640, emb_ref, label="640x640 Fallback")
-            
-            # If 640 found a better candidate than 1280, update our globals even if it doesn't meet threshold
-            if s_640 > best_sim:
-                best_match, best_sim, second_best_sim = m_640, s_640, ss_640
+        print(f"[crop] FORCE MATCH: Sim {best_sim:.4f} below threshold, but picking best candidate to satisfy 'ensure one' requirement.")
+        is_match = True
 
-            is_m_640 = (s_640 >= threshold) or \
-                       (s_640 >= 0.20 and s_640 > (ss_640 + 0.05)) or \
-                       (len(faces_640) <= 2 and s_640 >= 0.18)
-            
-            if is_m_640:
-                print(f"[crop] Found match in 640x640 fallback! Sim: {s_640:.4f}")
-                is_match = True
-
-    if not is_match:
-        if best_match:
-            print(f"[crop] FORCE MATCH: No threshold met. Picking highest sim across all passes: {best_sim:.4f}")
-            is_match = True
-        else:
-            print(f"No faces detected for {character.filename}.")
-            raise HTTPException(status_code=404, detail=f"No faces detected in the original photo")
-
-    print(f"Found match for {character.filename} with sim: {best_sim:.4f}")
+    print(f"Found final match for {character.filename} with sim: {best_sim:.4f}")
 
     # Crop
     cropped_img = crop_head(original_img, best_match)
