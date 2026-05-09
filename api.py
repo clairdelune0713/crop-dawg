@@ -1,10 +1,12 @@
 import os
 import cv2
 import numpy as np
+import base64
 from insightface.app import FaceAnalysis
 from io import BytesIO
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
+from typing import List
 import uvicorn
 from db import record_character_color, get_project_characters, clear_grid_characters
 
@@ -216,6 +218,142 @@ async def crop_character(
     )
 
     return StreamingResponse(io_buf, media_type="image/png")
+
+@app.post("/crop-multi")
+async def crop_multi(
+    original: UploadFile = File(...),
+    characters: List[UploadFile] = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...)
+):
+    """
+    Performs global matching for multiple characters at once.
+    Solves the assignment problem to ensure each character gets their best unique match.
+    """
+    try:
+        # Read original image
+        original_bytes = await original.read()
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise HTTPException(status_code=400, detail="Invalid original image")
+            
+        # 1. Detect all faces in original (Exhaustive)
+        all_faces = []
+        scales = [(1280, 1280), (960, 960), (640, 640)]
+        for sw, sh in scales:
+            app = face_app_1280 if sw > 640 else face_app_640
+            curr_faces = app.get(original_img)
+            all_faces.extend(curr_faces)
+
+        # Deduplicate
+        def get_iou(box1, box2):
+            x1 = max(box1[0], box2[0])
+            y1 = max(box1[1], box2[1])
+            x2 = min(box1[2], box2[2])
+            y2 = min(box1[3], box2[3])
+            inter = max(0, x2 - x1) * max(0, y2 - y1)
+            return inter / ((box1[2]-box1[0])*(box1[3]-box1[1]) + (box2[2]-box2[0])*(box2[3]-box2[1]) - inter)
+
+        unique_faces = []
+        for f in all_faces:
+            if not any(get_iou(f.bbox, uf.bbox) > 0.5 for uf in unique_faces):
+                unique_faces.append(f)
+        
+        if not unique_faces:
+            raise HTTPException(status_code=404, detail="No faces detected in original photo")
+
+        # 2. Get embeddings for all characters
+        char_data = []
+        for char_file in characters:
+            bytes_data = await char_file.read()
+            arr = np.frombuffer(bytes_data, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            emb = get_face_embedding(img)
+            char_name = os.path.splitext(char_file.filename)[0]
+            char_data.append({"name": char_name, "emb": emb})
+
+        # 3. Build Similarity Matrix (N chars x M faces)
+        num_chars = len(char_data)
+        num_faces = len(unique_faces)
+        sim_matrix = np.zeros((num_chars, num_faces))
+        for i in range(num_chars):
+            if char_data[i]["emb"] is not None:
+                for j in range(num_faces):
+                    emb_ref = char_data[i]["emb"]
+                    emb_face = unique_faces[j].embedding
+                    sim = np.dot(emb_ref, emb_face) / (np.linalg.norm(emb_ref) * np.linalg.norm(emb_face))
+                    sim_matrix[i][j] = sim
+
+        # 4. Solve Assignment (Maximizing total similarity)
+        # For small N, we can use a simple greedy approach with conflict resolution
+        # or a recursive search for the absolute best total score.
+        best_assignment = {} # {char_index: face_index}
+        
+        def solve(char_idx, current_assignment, current_score):
+            if char_idx == num_chars:
+                return current_assignment, current_score
+            
+            best_res_assign = None
+            best_res_score = -1e9
+            
+            # Option 1: Assign to one of the remaining faces
+            for face_idx in range(num_faces):
+                if face_idx not in current_assignment.values():
+                    new_assign = current_assignment.copy()
+                    new_assign[char_idx] = face_idx
+                    res_assign, res_score = solve(char_idx + 1, new_assign, current_score + sim_matrix[char_idx][face_idx])
+                    if res_score > best_res_score:
+                        best_res_score = res_score
+                        best_res_assign = res_assign
+            
+            # Option 2: Skip this character (if more chars than faces, or all faces bad)
+            # But we want to "ensure one", so we only skip if we absolutely have to.
+            if num_chars > num_faces:
+                res_assign, res_score = solve(char_idx + 1, current_assignment, current_score - 1.0) # Penalty for skipping
+                if res_score > best_res_score:
+                    best_res_score = res_score
+                    best_res_assign = res_assign
+                    
+            return best_res_assign, best_res_score
+
+        assignment, _ = solve(0, {}, 0)
+
+        # 5. Generate Crops and Records
+        results = {}
+        for char_idx, face_idx in assignment.items():
+            char = char_data[char_idx]
+            face = unique_faces[face_idx]
+            sim = sim_matrix[char_idx][face_idx]
+            
+            # Crop
+            cropped = crop_head(original_img, face)
+            _, buffer = cv2.imencode('.png', cropped)
+            base64_crop = base64.b64encode(buffer).decode('utf-8')
+            
+            # DB Record
+            nx1, ny1, nx2, ny2 = get_crop_coords(original_img, face)
+            record_character_color(
+                user_email, project_id, char["name"], 
+                embedding=char["emb"],
+                storyboard_number=storyboard_number,
+                grid_number=grid_number,
+                nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2)
+            )
+            
+            results[char["name"]] = {
+                "base64": base64_crop,
+                "sim": float(sim),
+                "coords": [int(nx1), int(ny1), int(nx2), int(ny2)]
+            }
+
+        return JSONResponse(content={"success": True, "crops": results})
+
+    except Exception as e:
+        print(f"[crop-multi] Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/fill-image")
 async def get_fill_image(
