@@ -101,6 +101,9 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
     conn = get_db_connection()
     cur = conn.cursor()
     try:
+        # Lock table to prevent race conditions during color assignment from parallel requests
+        cur.execute("LOCK TABLE character_colors IN EXCLUSIVE MODE")
+
         # Check if already exists
         cur.execute("""
             SELECT color_name, color_hex, color_bgr FROM character_colors 
@@ -108,6 +111,14 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
         """, (user_email, project_id, character_name))
         existing = cur.fetchone()
         if existing:
+            # If exists, we still want to update the coordinates if provided
+            if nx1 is not None:
+                cur.execute("""
+                    UPDATE character_colors 
+                    SET nx1=%s, ny1=%s, nx2=%s, ny2=%s, storyboard_number=%s, grid_number=%s
+                    WHERE user_email = %s AND project_id = %s AND character_name = %s
+                """, (nx1, ny1, nx2, ny2, storyboard_number, grid_number, user_email, project_id, character_name))
+                conn.commit()
             return existing
 
         # Get count of characters for this project to determine next color
