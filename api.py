@@ -190,7 +190,8 @@ async def get_fill_image(
     user_email: str = Form(...),
     project_id: str = Form(...),
     storyboard_number: int = Form(...),
-    grid_number: int = Form(...)
+    grid_number: int = Form(...),
+    char_names: str = Form(None)
 ):
     # Read original image
     try:
@@ -208,6 +209,12 @@ async def get_fill_image(
         storyboard_number=storyboard_number, 
         grid_number=grid_number
     )
+    
+    # Filter by specific names if provided
+    if char_names:
+        name_list = [n.strip() for n in char_names.split(',')]
+        characters = [c for c in characters if c['character_name'] in name_list]
+
     if not characters:
         # Return original image if no characters found
         _, buffer = cv2.imencode('.png', original_img)
