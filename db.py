@@ -89,7 +89,7 @@ def init_db():
         cur.close()
         conn.close()
 
-def record_character_color(user_email, project_id, character_name, embedding=None, storyboard_number=None, grid_number=None, nx1=None, ny1=None, nx2=None, ny2=None):
+def record_character_color(user_email, project_id, character_name, embedding=None, storyboard_number=None, grid_number=None, nx1=None, ny1=None, nx2=None, ny2=None, table_name="character_colors"):
     """
     Records the character color mapping. Assigns the next available color from the palette.
     If the character already has a color for this project, it returns that mapping.
@@ -97,13 +97,16 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
     if not user_email or not project_id:
         return None
 
-    init_db()
+    # Only init the default table
+    if table_name == "character_colors":
+        init_db()
+        
     conn = get_db_connection()
     cur = conn.cursor()
     try:
         # Check if already exists
-        cur.execute("""
-            SELECT color_name, color_hex, color_bgr FROM character_colors 
+        cur.execute(f"""
+            SELECT color_name, color_hex, color_bgr FROM {table_name} 
             WHERE user_email = %s AND project_id = %s AND character_name = %s
         """, (user_email, project_id, character_name))
         existing = cur.fetchone()
@@ -111,8 +114,8 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
             return existing
 
         # Get count of characters for this project to determine next color
-        cur.execute("""
-            SELECT COUNT(*) FROM character_colors 
+        cur.execute(f"""
+            SELECT COUNT(*) FROM {table_name} 
             WHERE user_email = %s AND project_id = %s
         """, (user_email, project_id))
         count = cur.fetchone()['count']
@@ -122,8 +125,8 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
         
         bgr_str = f"({color['bgr'][0]},{color['bgr'][1]},{color['bgr'][2]})"
         
-        cur.execute("""
-            INSERT INTO character_colors (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding, storyboard_number, grid_number, nx1, ny1, nx2, ny2)
+        cur.execute(f"""
+            INSERT INTO {table_name} (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding, storyboard_number, grid_number, nx1, ny1, nx2, ny2)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING color_name, color_hex, color_bgr
         """, (
@@ -141,7 +144,7 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
         cur.close()
         conn.close()
 
-def get_project_characters(user_email, project_id, storyboard_number=None, grid_number=None):
+def get_project_characters(user_email, project_id, storyboard_number=None, grid_number=None, table_name="character_colors"):
     """Retrieves all registered characters for a specific project, optionally filtered by storyboard/grid."""
     if not user_email or not project_id:
         return []
@@ -149,9 +152,9 @@ def get_project_characters(user_email, project_id, storyboard_number=None, grid_
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        query = """
+        query = f"""
             SELECT character_name, color_name, color_hex, color_bgr, embedding, nx1, ny1, nx2, ny2
-            FROM character_colors 
+            FROM {table_name} 
             WHERE user_email = %s AND project_id = %s
         """
         params = [user_email, project_id]
@@ -172,14 +175,14 @@ def get_project_characters(user_email, project_id, storyboard_number=None, grid_
 if __name__ == "__main__":
     init_db()
     print("Database initialized.")
-def clear_grid_characters(user_email, project_id, storyboard_number, grid_number):
+def clear_grid_characters(user_email, project_id, storyboard_number, grid_number, table_name="character_colors"):
     """Deletes all character records for a specific grid to allow for a clean re-enhancement."""
-    print(f"[DB] Clearing records for {user_email}/{project_id} | S{storyboard_number}-G{grid_number}")
+    print(f"[DB] Clearing records in {table_name} for {user_email}/{project_id} | S{storyboard_number}-G{grid_number}")
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        cur.execute("""
-            DELETE FROM character_colors
+        cur.execute(f"""
+            DELETE FROM {table_name}
             WHERE user_email = %s 
               AND project_id = %s 
               AND storyboard_number = %s 

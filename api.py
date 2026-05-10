@@ -103,7 +103,8 @@ async def crop_character(
     user_email: str = Form(...),
     project_id: str = Form(...),
     storyboard_number: int = Form(...),
-    grid_number: int = Form(...)
+    grid_number: int = Form(...),
+    table_name: str = Form("character_colors")
 ):
     # Read files
     try:
@@ -219,7 +220,8 @@ async def crop_character(
         embedding=emb_ref, 
         storyboard_number=storyboard_number, 
         grid_number=grid_number,
-        nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2)
+        nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2),
+        table_name=table_name
     )
 
     return StreamingResponse(io_buf, media_type="image/png")
@@ -231,7 +233,8 @@ async def crop_multi(
     user_email: str = Form(...),
     project_id: str = Form(...),
     storyboard_number: int = Form(...),
-    grid_number: int = Form(...)
+    grid_number: int = Form(...),
+    table_name: str = Form("character_colors")
 ):
     """
     Performs global matching for multiple characters at once.
@@ -355,7 +358,8 @@ async def crop_multi(
                 embedding=char["emb"],
                 storyboard_number=storyboard_number,
                 grid_number=grid_number,
-                nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2)
+                nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2),
+                table_name=table_name
             )
             
             results[char["name"]] = {
@@ -377,7 +381,8 @@ async def get_fill_image(
     project_id: str = Form(...),
     storyboard_number: int = Form(...),
     grid_number: int = Form(...),
-    char_names: str = Form(None)
+    char_names: str = Form(None),
+    table_name: str = Form("character_colors")
 ):
     # Read original image
     try:
@@ -393,7 +398,8 @@ async def get_fill_image(
     characters = get_project_characters(
         user_email, project_id, 
         storyboard_number=storyboard_number, 
-        grid_number=grid_number
+        grid_number=grid_number,
+        table_name=table_name
     )
     
     # Filter by specific names if provided
@@ -463,10 +469,11 @@ async def clear_grid(
     user_email: str = Form(...),
     project_id: str = Form(...),
     storyboard_number: int = Form(...),
-    grid_number: int = Form(...)
+    grid_number: int = Form(...),
+    table_name: str = Form("character_colors")
 ):
     try:
-        clear_grid_characters(user_email, project_id, storyboard_number, grid_number)
+        clear_grid_characters(user_email, project_id, storyboard_number, grid_number, table_name=table_name)
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
