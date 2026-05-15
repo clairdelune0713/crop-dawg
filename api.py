@@ -373,7 +373,7 @@ async def crop_multi(
 
         # 5. Generate Crops and Records
         results = {}
-        for i in range(num_chars):
+        for i in range(len(char_data)):
             if i not in assignment:
                 print(f"[crop-multi] Character '{char_data[i]['name']}' skipped (no match found above {threshold})")
 
