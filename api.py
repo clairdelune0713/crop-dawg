@@ -156,7 +156,9 @@ def solve_assignments(char_data, unique_faces, threshold=0.25):
                 sim_matrix[i][j] = sim
 
     # 2. Solver Logic
-    null_score = threshold - 0.05
+    # Set null_score very low to ensure we always try to match a face if one is available.
+    # This follows the "Force Match" requirement.
+    null_score = -10.0 
     
     print(f"[solver] Similarity Matrix ({num_chars}x{num_faces}):")
     header = " " * 15
@@ -180,13 +182,12 @@ def solve_assignments(char_data, unique_faces, threshold=0.25):
         for face_idx in range(num_faces):
             if face_idx not in current_assignment.values():
                 sim = sim_matrix[char_idx][face_idx]
-                if sim >= threshold:
-                    new_assign = current_assignment.copy()
-                    new_assign[char_idx] = face_idx
-                    res_assign, res_score = solve(char_idx + 1, new_assign, current_score + sim)
-                    if res_score > best_res_score:
-                        best_res_score = res_score
-                        best_res_assign = res_assign
+                new_assign = current_assignment.copy()
+                new_assign[char_idx] = face_idx
+                res_assign, res_score = solve(char_idx + 1, new_assign, current_score + sim)
+                if res_score > best_res_score:
+                    best_res_score = res_score
+                    best_res_assign = res_assign
         
         # Option 2: Skip this character (Null match)
         res_assign, res_score = solve(char_idx + 1, current_assignment, current_score + null_score)
@@ -375,7 +376,7 @@ async def crop_multi(
         results = {}
         for i in range(len(char_data)):
             if i not in assignment:
-                print(f"[crop-multi] Character '{char_data[i]['name']}' skipped (no match found above {threshold})")
+                print(f"[crop-multi] Character '{char_data[i]['name']}' skipped (not enough faces detected in image)")
 
         for char_idx, face_idx in assignment.items():
             char = char_data[char_idx]
