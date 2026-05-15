@@ -37,10 +37,10 @@ def get_crop_coords(img, face, padding=0.6):
     # Head crop usually needs more top padding
     side = max(fw, fh) * (1 + padding)
     
-    nx1 = int(max(0, cx - side // 2 * 0.8)) # Narrow horizontal margin
+    nx1 = int(max(0, cx - side // 2 * 1.0)) # Wider horizontal margin
     ny1 = int(max(0, cy - side // 2 * 1.3)) # Shift up for head
-    nx2 = int(min(w, cx + side // 2 * 0.8)) # Narrow horizontal margin
-    ny2 = int(min(h, cy + side // 2 * 0.9)) # Include more of the bottom
+    nx2 = int(min(w, cx + side // 2 * 1.0)) # Wider horizontal margin
+    ny2 = int(min(h, cy + side // 2 * 1.6)) # Include shoulders (more bottom)
     
     return nx1, ny1, nx2, ny2
 
@@ -84,12 +84,11 @@ def main():
     fill_img = original_img.copy()
     mask = np.zeros(original_img.shape[:2], dtype=np.uint8) # Track filled areas
     colors = [
-        (255, 0, 0),   # Blue (BGR)
-        (0, 255, 0),   # Green
-        (0, 0, 255),   # Red
-        (255, 255, 0), # Cyan
-        (255, 0, 255), # Magenta
+        (0, 0, 255),   # Red (BGR)
+        (255, 0, 0),   # Blue
         (0, 255, 255), # Yellow
+        (0, 255, 0),   # Green
+        (0, 165, 255), # Orange
     ]
     color_idx = 0
 

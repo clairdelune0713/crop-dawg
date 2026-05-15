@@ -1,29 +1,63 @@
 import os
 import cv2
 import numpy as np
+import base64
 from insightface.app import FaceAnalysis
 from io import BytesIO
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.responses import StreamingResponse, JSONResponse
+from typing import List
 import uvicorn
+from db import record_character_color, get_project_characters, clear_grid_characters
 
 app = FastAPI(title="Face Head Cropper API")
 
-# Initialize InsightFace globally for performance
-face_app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-face_app.prepare(ctx_id=0, det_size=(640, 640))
+# High-res models for different scales
+face_app_1600 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_1600.prepare(ctx_id=0, det_size=(1600, 1600), det_thresh=0.1)
+
+face_app_1280 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_1280.prepare(ctx_id=0, det_size=(1280, 1280), det_thresh=0.1)
+
+face_app_960 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_960.prepare(ctx_id=0, det_size=(960, 960), det_thresh=0.1)
+
+face_app_640 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
+face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.1)
 
 def get_face_embedding(img):
-    """Detects the largest face in a CV2 image and returns its embedding."""
-    faces = face_app.get(img)
-    if len(faces) == 0:
-        return None
-    # Sort by bbox area to find the main character (largest face)
-    faces = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
-    return faces[0].embedding
+    """Detects the largest face in a portrait and returns its embedding, prioritizing stable scales."""
+    h, w, _ = img.shape
+    
+    # For portraits, 640 and 960 are usually much more stable than 1280/1600 
+    # because the face is already very large in the frame.
+    scales = [face_app_640, face_app_960, face_app_1280]
+    
+    best_face = None
+    max_score = -1
+    
+    for app in scales:
+        faces = app.get(img)
+        if faces:
+            # Pick largest face at this scale
+            faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
+            f = faces[0]
+            # If we have a very high confidence face, we can stop
+            if f.det_score > 0.8:
+                return f.embedding
+            # Otherwise keep track of the best one we've seen
+            if f.det_score > max_score:
+                max_score = f.det_score
+                best_face = f
+    
+    if best_face:
+        return best_face.embedding
+    
+    print("[get_face_embedding] No face found in portrait after trying multiple scales.")
+    return None
 
-def crop_head(img, face, padding=0.6):
-    """Crops the head from the image based on the face bounding box."""
+def get_crop_coords(img, face, padding=0.6):
+    """Calculates the coordinates for the head crop."""
     h, w, _ = img.shape
     bbox = face.bbox.astype(int)
     
@@ -38,16 +72,154 @@ def crop_head(img, face, padding=0.6):
     # Head crop usually needs more top padding
     side = max(fw, fh) * (1 + padding)
     
-    nx1 = int(max(0, cx - side // 2 * 0.8)) # Narrow horizontal margin
+    nx1 = int(max(0, cx - side // 2 * 1.0)) # Wider horizontal margin
     ny1 = int(max(0, cy - side // 2 * 1.3)) # Shift up for head
-    nx2 = int(min(w, cx + side // 2 * 0.8)) # Narrow horizontal margin
-    ny2 = int(min(h, cy + side // 2 * 0.9)) # Include more of the bottom
+    nx2 = int(min(w, cx + side // 2 * 1.0)) # Wider horizontal margin
+    ny2 = int(min(h, cy + side // 2 * 1.6)) # Include shoulders (more bottom)
     
+    return nx1, ny1, nx2, ny2
+
+def find_best_match(target_faces, ref_emb, label=""):
+    """Finds the best matching face among candidates."""
+    best_m = None
+    best_s = -1
+    second_s = -1
+    if label:
+        print(f"  [Matching {label}] against {len(target_faces)} faces:")
+    for i, face in enumerate(target_faces):
+        # Cosine similarity
+        sim = np.dot(ref_emb, face.embedding) / (np.linalg.norm(ref_emb) * np.linalg.norm(face.embedding))
+        if label:
+            print(f"    Face {i}: similarity = {sim:.4f}")
+        if sim > best_s:
+            second_s = best_s
+            best_s = sim
+            best_m = face
+        elif sim > second_s:
+            second_s = sim
+    return best_m, best_s, second_s
+
+def crop_head(img, face, padding=0.6):
+    """Crops the head from the image based on the face bounding box."""
+    nx1, ny1, nx2, ny2 = get_crop_coords(img, face, padding)
     crop = img[ny1:ny2, nx1:nx2]
     return crop
 
+def get_unique_faces(img):
+    """Detects all faces in original (Exhaustive Multi-Scale) and deduplicates."""
+    all_faces = []
+    apps = [
+        (face_app_1600, "1600"),
+        (face_app_1280, "1280"),
+        (face_app_960,  "960"),
+        (face_app_640,  "640")
+    ]
+    
+    for app, label in apps:
+        print(f"[detection] Detecting faces at {label}x{label}...")
+        curr_faces = app.get(img)
+        all_faces.extend(curr_faces)
+
+    # Deduplicate
+    def get_iou(box1, box2):
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        denom = (area1 + area2 - inter)
+        return inter / denom if denom > 0 else 0
+
+    unique_faces = []
+    all_faces.sort(key=lambda x: x.det_score, reverse=True)
+    for f in all_faces:
+        # Lower IOU threshold to 0.4 to ensure each person is unique
+        if not any(get_iou(f.bbox, uf.bbox) > 0.4 for uf in unique_faces):
+            unique_faces.append(f)
+    
+    print(f"[detection] Total unique faces found: {len(unique_faces)}")
+    return unique_faces
+
+def solve_assignments(char_data, unique_faces, threshold=0.25):
+    """
+    Performs global matching for multiple characters at once.
+    char_data: List of {"name": str, "emb": array}
+    unique_faces: List of InsightFace Face objects
+    """
+    num_chars = len(char_data)
+    num_faces = len(unique_faces)
+    
+    if num_chars == 0 or num_faces == 0:
+        return {}, 0.0, np.zeros((num_chars, num_faces))
+
+    # 1. Build Similarity Matrix
+    sim_matrix = np.zeros((num_chars, num_faces))
+    for i in range(num_chars):
+        if char_data[i]["emb"] is not None:
+            for j in range(num_faces):
+                emb_ref = char_data[i]["emb"]
+                emb_face = unique_faces[j].embedding
+                sim = np.dot(emb_ref, emb_face) / (np.linalg.norm(emb_ref) * np.linalg.norm(emb_face))
+                sim_matrix[i][j] = sim
+
+    # 2. Solver Logic
+    # Set null_score very low to ensure we always try to match a face if one is available.
+    # This follows the "Force Match" requirement.
+    null_score = -10.0 
+    
+    print(f"[solver] Similarity Matrix ({num_chars}x{num_faces}):")
+    header = " " * 15
+    for j in range(num_faces):
+        header += f"Face {j:<4} "
+    print(header)
+    for i in range(num_chars):
+        row = f"{char_data[i]['name'][:14]:15}"
+        for j in range(num_faces):
+            row += f"{sim_matrix[i][j]:.4f} "
+        print(row)
+
+    def solve(char_idx, current_assignment, current_score):
+        if char_idx == num_chars:
+            return current_assignment, current_score
+        
+        best_res_assign = None
+        best_res_score = -1e9
+        
+        # Option 1: Assign to one of the remaining faces
+        for face_idx in range(num_faces):
+            if face_idx not in current_assignment.values():
+                sim = sim_matrix[char_idx][face_idx]
+                new_assign = current_assignment.copy()
+                new_assign[char_idx] = face_idx
+                res_assign, res_score = solve(char_idx + 1, new_assign, current_score + sim)
+                if res_score > best_res_score:
+                    best_res_score = res_score
+                    best_res_assign = res_assign
+        
+        # Option 2: Skip this character (Null match)
+        res_assign, res_score = solve(char_idx + 1, current_assignment, current_score + null_score)
+        if res_score > best_res_score:
+            best_res_score = res_score
+            best_res_assign = res_assign
+                
+        return best_res_assign, best_res_score
+
+    assignment, total_score = solve(0, {}, 0)
+    print(f"[solver] Final assignment total score: {total_score:.4f}")
+    return assignment, total_score, sim_matrix
+
 @app.post("/crop")
-async def crop_character(original: UploadFile = File(...), character: UploadFile = File(...)):
+async def crop_character(
+    original: UploadFile = File(...), 
+    character: UploadFile = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...),
+    table_name: str = Form("character_colors")
+):
     # Read files
     try:
         original_bytes = await original.read()
@@ -70,24 +242,80 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
     if emb_ref is None:
         raise HTTPException(status_code=400, detail="No face detected in the character portrait")
 
-    # Detect all faces in original photo
-    faces = face_app.get(original_img)
-    if len(faces) == 0:
-        raise HTTPException(status_code=404, detail="No faces detected in the original photo")
+    # 1. Exhaustive Multi-Scale Detection
+    all_faces = []
+    scales = [(1280, 1280), (960, 960), (640, 640)]
+    
+    for sw, sh in scales:
+        print(f"[crop] Detecting faces at {sw}x{sh}...")
+        # We reuse the apps but change det_size dynamically if needed, 
+        # but for simplicity we'll just use the two prepared ones for now 
+        # and maybe add a third if it helps.
+        app = face_app_1280 if sw > 640 else face_app_640
+        # InsightFace apps det_size is set during prepare, so we just use the two we have.
+        curr_faces = app.get(original_img)
+        print(f"    Found {len(curr_faces)} candidates.")
+        all_faces.extend(curr_faces)
+        if len(curr_faces) > 0 and sw == 1280:
+            # If we found faces at high res, we might still want to try lower res 
+            # for smaller faces that might have been missed by high-res stride.
+            pass
 
-    threshold = 0.3
-    best_match = None
-    best_sim = -1
+    # Deduplicate faces based on bounding box overlap (IOU)
+    def get_iou(box1, box2):
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        return inter / (area1 + area2 - inter)
 
-    for face in faces:
-        # Cosine similarity
-        sim = np.dot(emb_ref, face.embedding) / (np.linalg.norm(emb_ref) * np.linalg.norm(face.embedding))
-        if sim > threshold and sim > best_sim:
-            best_sim = sim
-            best_match = face
+    unique_faces = []
+    for f in all_faces:
+        is_duplicate = False
+        for uf in unique_faces:
+            if get_iou(f.bbox, uf.bbox) > 0.5:
+                # Keep the one with higher detection score
+                if f.det_score > uf.det_score:
+                    unique_faces.remove(uf)
+                    unique_faces.append(f)
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            unique_faces.append(f)
 
-    if best_match is None:
-        raise HTTPException(status_code=404, detail="Character not found in the original photo")
+    print(f"[crop] Total unique candidates: {len(unique_faces)}")
+
+    if not unique_faces:
+        # Last resort: Try very small detection size and lowest threshold
+        print("[crop] NO FACES FOUND. Last resort attempt at 320x320...")
+        face_app_640.prepare(ctx_id=0, det_size=(320, 320), det_thresh=0.01)
+        unique_faces = face_app_640.get(original_img)
+        # Restore for next call
+        face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.1)
+
+    if not unique_faces:
+        print(f"No faces detected for {character.filename} even after fallback.")
+        raise HTTPException(status_code=404, detail=f"No faces detected in the original photo")
+
+    # 2. Matching
+    best_match, best_sim, second_best_sim = find_best_match(unique_faces, emb_ref, label="Exhaustive")
+    
+    # Check if we have a valid match
+    threshold = 0.25
+    is_match = (best_match is not None) and (
+        (best_sim >= threshold) or \
+        (best_sim >= 0.20 and best_sim > (second_best_sim + 0.10)) or \
+        (len(unique_faces) == 1) # If only one face in the whole image, it MUST be the one
+    )
+
+    if not is_match:
+        print(f"[crop] FORCE MATCH: Sim {best_sim:.4f} below threshold, but picking best candidate to satisfy 'ensure one' requirement.")
+        is_match = True
+
+    print(f"Found final match for {character.filename} with sim: {best_sim:.4f}")
 
     # Crop
     cropped_img = crop_head(original_img, best_match)
@@ -96,10 +324,193 @@ async def crop_character(original: UploadFile = File(...), character: UploadFile
     _, buffer = cv2.imencode('.png', cropped_img)
     io_buf = BytesIO(buffer)
     
+    # Calculate crop coordinates for DB
+    nx1, ny1, nx2, ny2 = get_crop_coords(original_img, best_match)
+    
+    # Record in DB (All info is now required)
+    char_name = os.path.splitext(character.filename)[0] if character.filename else "unknown"
+    record_character_color(
+        user_email, project_id, char_name, 
+        embedding=emb_ref, 
+        storyboard_number=storyboard_number, 
+        grid_number=grid_number,
+        nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2),
+        table_name=table_name
+    )
+
     return StreamingResponse(io_buf, media_type="image/png")
 
-def main():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.post("/crop-multi")
+async def crop_multi(
+    original: UploadFile = File(...),
+    characters: List[UploadFile] = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...),
+    table_name: str = Form("character_colors")
+):
+    """
+    Performs global matching for multiple characters at once.
+    Solves the assignment problem to ensure each character gets their best unique match.
+    """
+    try:
+        # Read original image
+        original_bytes = await original.read()
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise HTTPException(status_code=400, detail="Invalid original image")
+            
+        # 1. Detect all faces in original (Exhaustive)
+        unique_faces = get_unique_faces(original_img)
+        if not unique_faces:
+            raise HTTPException(status_code=404, detail="No faces detected in original photo")
+            
+        # 2. Get embeddings for all characters
+        char_data = []
+        for char_file in characters:
+            bytes_data = await char_file.read()
+            arr = np.frombuffer(bytes_data, np.uint8)
+            img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            emb = get_face_embedding(img)
+            char_name = os.path.splitext(char_file.filename)[0]
+            char_data.append({"name": char_name, "emb": emb})
+
+        # 3. Solve Assignment
+        threshold = 0.25
+        assignment, total_score, sim_matrix = solve_assignments(char_data, unique_faces, threshold=threshold)
+
+        # 5. Generate Crops and Records
+        results = {}
+        for i in range(len(char_data)):
+            if i not in assignment:
+                print(f"[crop-multi] Character '{char_data[i]['name']}' skipped (not enough faces detected in image)")
+
+        for char_idx, face_idx in assignment.items():
+            char = char_data[char_idx]
+            face = unique_faces[face_idx]
+            sim = sim_matrix[char_idx][face_idx]
+            
+            # Crop
+            cropped = crop_head(original_img, face)
+            _, buffer = cv2.imencode('.png', cropped)
+            base64_crop = base64.b64encode(buffer).decode('utf-8')
+            
+            # DB Record
+            nx1, ny1, nx2, ny2 = get_crop_coords(original_img, face)
+            record_character_color(
+                user_email, project_id, char["name"], 
+                embedding=char["emb"],
+                storyboard_number=storyboard_number,
+                grid_number=grid_number,
+                nx1=int(nx1), ny1=int(ny1), nx2=int(nx2), ny2=int(ny2),
+                table_name=table_name
+            )
+            
+            results[char["name"]] = {
+                "base64": base64_crop,
+                "sim": float(sim),
+                "coords": [int(nx1), int(ny1), int(nx2), int(ny2)]
+            }
+
+        return JSONResponse(content={"success": True, "crops": results})
+
+    except Exception as e:
+        print(f"[crop-multi] Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/fill-image")
+async def get_fill_image(
+    original: UploadFile = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...),
+    char_names: str = Form(None),
+    table_name: str = Form("character_colors")
+):
+    # Read original image
+    try:
+        original_bytes = await original.read()
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise HTTPException(status_code=400, detail="Invalid original image")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+
+    # Get all characters for this project, optionally filtered by storyboard/grid
+    characters = get_project_characters(
+        user_email, project_id, 
+        storyboard_number=storyboard_number, 
+        grid_number=grid_number,
+        table_name=table_name
+    )
+    
+    # Filter by specific names if provided
+    if char_names:
+        name_list = [n.strip() for n in char_names.split(',')]
+        characters = [c for c in characters if c['character_name'] in name_list]
+
+    if not characters:
+        # Return original image if no characters found
+        _, buffer = cv2.imencode('.png', original_img)
+        return StreamingResponse(BytesIO(buffer), media_type="image/png")
+
+    # Detect faces once using the unified multi-scale logic
+    unique_faces = get_unique_faces(original_img)
+    
+    fill_img = original_img.copy()
+    mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
+    threshold = 0.25
+
+    # Build character data from DB records
+    char_data = []
+    for char in characters:
+        char_data.append({
+            "name": char['character_name'],
+            "emb": np.array(char['embedding'])
+        })
+
+    # Solve assignment globally
+    assignment, total_score, sim_matrix = solve_assignments(char_data, unique_faces, threshold=threshold)
+
+    print(f"Generating fill image for {len(characters)} characters...")
+    for char_idx, face_idx in assignment.items():
+        char_db = characters[char_idx]
+        face = unique_faces[face_idx]
+        sim = sim_matrix[char_idx][face_idx]
+        
+        print(f"    [fill] Final match for {char_db['character_name']} with sim: {sim:.4f}")
+        nx1, ny1, nx2, ny2 = get_crop_coords(original_img, face)
+        
+        # Parse color_bgr string "(b,g,r)"
+        color_str = char_db['color_bgr'].strip('()')
+        b, g, r = map(int, color_str.split(','))
+        color_bgr = (b, g, r)
+        
+        # Draw SOLID rectangle on fill image (thickness = -1)
+        cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
+        # Fill mask
+        cv2.rectangle(mask, (nx1, ny1), (nx2, ny2), 255, -1)
+    # Encode result
+    _, buffer = cv2.imencode('.png', fill_img)
+    return StreamingResponse(BytesIO(buffer), media_type="image/png")
+
+@app.post("/clear-grid")
+async def clear_grid(
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    storyboard_number: int = Form(...),
+    grid_number: int = Form(...),
+    table_name: str = Form("character_colors")
+):
+    try:
+        clear_grid_characters(user_email, project_id, storyboard_number, grid_number, table_name=table_name)
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host="0.0.0.0", port=8000)
