@@ -26,26 +26,35 @@ face_app_640 = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']
 face_app_640.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.1)
 
 def get_face_embedding(img):
-    """Detects the largest face in a CV2 image and returns its embedding."""
+    """Detects the largest face in a portrait and returns its embedding, prioritizing stable scales."""
     h, w, _ = img.shape
-    print(f"[get_face_embedding] Input image size: {w}x{h}")
     
-    # Try with 1280x1280
-    faces = face_app_1280.get(img)
+    # For portraits, 640 and 960 are usually much more stable than 1280/1600 
+    # because the face is already very large in the frame.
+    scales = [face_app_640, face_app_960, face_app_1280]
     
-    # Fallback to 640x640
-    if len(faces) == 0:
-        print("[get_face_embedding] No face found at 1280x1280, trying 640x640...")
-        faces = face_app_640.get(img)
-        
-    if len(faces) == 0:
-        print("[get_face_embedding] Still no face found after fallback.")
-        return None
-        
-    print(f"[get_face_embedding] Found {len(faces)} faces. Selecting largest.")
-    # Sort by bbox area to find the main character (largest face)
-    faces = sorted(faces, key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
-    return faces[0].embedding
+    best_face = None
+    max_score = -1
+    
+    for app in scales:
+        faces = app.get(img)
+        if faces:
+            # Pick largest face at this scale
+            faces.sort(key=lambda x: (x.bbox[2]-x.bbox[0]) * (x.bbox[3]-x.bbox[1]), reverse=True)
+            f = faces[0]
+            # If we have a very high confidence face, we can stop
+            if f.det_score > 0.8:
+                return f.embedding
+            # Otherwise keep track of the best one we've seen
+            if f.det_score > max_score:
+                max_score = f.det_score
+                best_face = f
+    
+    if best_face:
+        return best_face.embedding
+    
+    print("[get_face_embedding] No face found in portrait after trying multiple scales.")
+    return None
 
 def get_crop_coords(img, face, padding=0.6):
     """Calculates the coordinates for the head crop."""
