@@ -96,6 +96,110 @@ def crop_head(img, face, padding=0.6):
     crop = img[ny1:ny2, nx1:nx2]
     return crop
 
+def get_unique_faces(img):
+    """Detects all faces in original (Exhaustive Multi-Scale) and deduplicates."""
+    all_faces = []
+    apps = [
+        (face_app_1600, "1600"),
+        (face_app_1280, "1280"),
+        (face_app_960,  "960"),
+        (face_app_640,  "640")
+    ]
+    
+    for app, label in apps:
+        print(f"[detection] Detecting faces at {label}x{label}...")
+        curr_faces = app.get(img)
+        all_faces.extend(curr_faces)
+
+    # Deduplicate
+    def get_iou(box1, box2):
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        denom = (area1 + area2 - inter)
+        return inter / denom if denom > 0 else 0
+
+    unique_faces = []
+    all_faces.sort(key=lambda x: x.det_score, reverse=True)
+    for f in all_faces:
+        # Lower IOU threshold to 0.4 to ensure each person is unique
+        if not any(get_iou(f.bbox, uf.bbox) > 0.4 for uf in unique_faces):
+            unique_faces.append(f)
+    
+    print(f"[detection] Total unique faces found: {len(unique_faces)}")
+    return unique_faces
+
+def solve_assignments(char_data, unique_faces, threshold=0.25):
+    """
+    Performs global matching for multiple characters at once.
+    char_data: List of {"name": str, "emb": array}
+    unique_faces: List of InsightFace Face objects
+    """
+    num_chars = len(char_data)
+    num_faces = len(unique_faces)
+    
+    if num_chars == 0 or num_faces == 0:
+        return {}, 0.0, np.zeros((num_chars, num_faces))
+
+    # 1. Build Similarity Matrix
+    sim_matrix = np.zeros((num_chars, num_faces))
+    for i in range(num_chars):
+        if char_data[i]["emb"] is not None:
+            for j in range(num_faces):
+                emb_ref = char_data[i]["emb"]
+                emb_face = unique_faces[j].embedding
+                sim = np.dot(emb_ref, emb_face) / (np.linalg.norm(emb_ref) * np.linalg.norm(emb_face))
+                sim_matrix[i][j] = sim
+
+    # 2. Solver Logic
+    null_score = threshold - 0.05
+    
+    print(f"[solver] Similarity Matrix ({num_chars}x{num_faces}):")
+    header = " " * 15
+    for j in range(num_faces):
+        header += f"Face {j:<4} "
+    print(header)
+    for i in range(num_chars):
+        row = f"{char_data[i]['name'][:14]:15}"
+        for j in range(num_faces):
+            row += f"{sim_matrix[i][j]:.4f} "
+        print(row)
+
+    def solve(char_idx, current_assignment, current_score):
+        if char_idx == num_chars:
+            return current_assignment, current_score
+        
+        best_res_assign = None
+        best_res_score = -1e9
+        
+        # Option 1: Assign to one of the remaining faces
+        for face_idx in range(num_faces):
+            if face_idx not in current_assignment.values():
+                sim = sim_matrix[char_idx][face_idx]
+                if sim >= threshold:
+                    new_assign = current_assignment.copy()
+                    new_assign[char_idx] = face_idx
+                    res_assign, res_score = solve(char_idx + 1, new_assign, current_score + sim)
+                    if res_score > best_res_score:
+                        best_res_score = res_score
+                        best_res_assign = res_assign
+        
+        # Option 2: Skip this character (Null match)
+        res_assign, res_score = solve(char_idx + 1, current_assignment, current_score + null_score)
+        if res_score > best_res_score:
+            best_res_score = res_score
+            best_res_assign = res_assign
+                
+        return best_res_assign, best_res_score
+
+    assignment, total_score = solve(0, {}, 0)
+    print(f"[solver] Final assignment total score: {total_score:.4f}")
+    return assignment, total_score, sim_matrix
+
 @app.post("/crop")
 async def crop_character(
     original: UploadFile = File(...), 
@@ -249,40 +353,10 @@ async def crop_multi(
             raise HTTPException(status_code=400, detail="Invalid original image")
             
         # 1. Detect all faces in original (Exhaustive)
-        all_faces = []
-        apps = [
-            (face_app_1600, "1600"),
-            (face_app_1280, "1280"),
-            (face_app_960,  "960"),
-            (face_app_640,  "640")
-        ]
-        
-        for app, label in apps:
-            print(f"[crop] Detecting faces at {label}x{label}...")
-            curr_faces = app.get(original_img)
-            all_faces.extend(curr_faces)
-
-        # Deduplicate
-        def get_iou(box1, box2):
-            x1 = max(box1[0], box2[0])
-            y1 = max(box1[1], box2[1])
-            x2 = min(box1[2], box2[2])
-            y2 = min(box1[3], box2[3])
-            inter = max(0, x2 - x1) * max(0, y2 - y1)
-            area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
-            area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
-            denom = (area1 + area2 - inter)
-            return inter / denom if denom > 0 else 0
-
-        unique_faces = []
-        all_faces.sort(key=lambda x: x.det_score, reverse=True)
-        for f in all_faces:
-            if not any(get_iou(f.bbox, uf.bbox) > 0.7 for uf in unique_faces):
-                unique_faces.append(f)
-        
+        unique_faces = get_unique_faces(original_img)
         if not unique_faces:
             raise HTTPException(status_code=404, detail="No faces detected in original photo")
-
+            
         # 2. Get embeddings for all characters
         char_data = []
         for char_file in characters:
@@ -293,54 +367,16 @@ async def crop_multi(
             char_name = os.path.splitext(char_file.filename)[0]
             char_data.append({"name": char_name, "emb": emb})
 
-        # 3. Build Similarity Matrix (N chars x M faces)
-        num_chars = len(char_data)
-        num_faces = len(unique_faces)
-        sim_matrix = np.zeros((num_chars, num_faces))
-        for i in range(num_chars):
-            if char_data[i]["emb"] is not None:
-                for j in range(num_faces):
-                    emb_ref = char_data[i]["emb"]
-                    emb_face = unique_faces[j].embedding
-                    sim = np.dot(emb_ref, emb_face) / (np.linalg.norm(emb_ref) * np.linalg.norm(emb_face))
-                    sim_matrix[i][j] = sim
-
-        # 4. Solve Assignment (Maximizing total similarity)
-        # For small N, we can use a simple greedy approach with conflict resolution
-        # or a recursive search for the absolute best total score.
-        best_assignment = {} # {char_index: face_index}
-        
-        def solve(char_idx, current_assignment, current_score):
-            if char_idx == num_chars:
-                return current_assignment, current_score
-            
-            best_res_assign = None
-            best_res_score = -1e9
-            
-            # Option 1: Assign to one of the remaining faces
-            for face_idx in range(num_faces):
-                if face_idx not in current_assignment.values():
-                    new_assign = current_assignment.copy()
-                    new_assign[char_idx] = face_idx
-                    res_assign, res_score = solve(char_idx + 1, new_assign, current_score + sim_matrix[char_idx][face_idx])
-                    if res_score > best_res_score:
-                        best_res_score = res_score
-                        best_res_assign = res_assign
-            
-            # Option 2: Skip this character (if more chars than faces, or all faces bad)
-            # But we want to "ensure one", so we only skip if we absolutely have to.
-            if num_chars > num_faces:
-                res_assign, res_score = solve(char_idx + 1, current_assignment, current_score - 1.0) # Penalty for skipping
-                if res_score > best_res_score:
-                    best_res_score = res_score
-                    best_res_assign = res_assign
-                    
-            return best_res_assign, best_res_score
-
-        assignment, _ = solve(0, {}, 0)
+        # 3. Solve Assignment
+        threshold = 0.25
+        assignment, total_score, sim_matrix = solve_assignments(char_data, unique_faces, threshold=threshold)
 
         # 5. Generate Crops and Records
         results = {}
+        for i in range(num_chars):
+            if i not in assignment:
+                print(f"[crop-multi] Character '{char_data[i]['name']}' skipped (no match found above {threshold})")
+
         for char_idx, face_idx in assignment.items():
             char = char_data[char_idx]
             face = unique_faces[face_idx]
@@ -412,54 +448,42 @@ async def get_fill_image(
         _, buffer = cv2.imencode('.png', original_img)
         return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
-    # Detect faces in original photo (Try 1280 first)
-    faces_1280 = face_app_1280.get(original_img)
-    faces_640 = face_app_640.get(original_img)
+    # Detect faces once using the unified multi-scale logic
+    unique_faces = get_unique_faces(original_img)
     
     fill_img = original_img.copy()
     mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
     threshold = 0.25
 
-    print(f"Generating fill image for {len(characters)} characters...")
+    # Build character data from DB records
+    char_data = []
     for char in characters:
-        char_name = char['character_name']
-        emb_stored = np.array(char['embedding'])
+        char_data.append({
+            "name": char['character_name'],
+            "emb": np.array(char['embedding'])
+        })
+
+    # Solve assignment globally
+    assignment, total_score, sim_matrix = solve_assignments(char_data, unique_faces, threshold=threshold)
+
+    print(f"Generating fill image for {len(characters)} characters...")
+    for char_idx, face_idx in assignment.items():
+        char_db = characters[char_idx]
+        face = unique_faces[face_idx]
+        sim = sim_matrix[char_idx][face_idx]
         
-        # Try matching with 1280 faces first
-        best_match, best_sim, second_best_sim = find_best_match(faces_1280, emb_stored, label=f"1280 {char_name}")
-        is_match = (best_match is not None) and (
-            (best_sim >= threshold) or \
-            (best_sim >= 0.20 and best_sim > (second_best_sim + 0.05)) or \
-            (len(faces_1280) <= 2 and best_sim >= 0.18)
-        )
-
-        # Fallback to 640 faces if not matched
-        if not is_match and len(faces_640) > 0:
-            print(f"    [fill] No match for {char_name} at 1280x1280. Retrying at 640x640...")
-            m_640, s_640, ss_640 = find_best_match(faces_640, emb_stored, label=f"640 {char_name} Fallback")
-            if (s_640 >= threshold) or \
-               (s_640 >= 0.20 and s_640 > (ss_640 + 0.05)) or \
-               (len(faces_640) <= 2 and s_640 >= 0.18):
-                best_match, best_sim, second_best_sim = m_640, s_640, ss_640
-                is_match = True
-
-        if not is_match and best_match:
-            print(f"    [fill] FORCE MATCH for {char_name} with sim: {best_sim:.4f}")
-            is_match = True
-
-        if is_match:
-            print(f"    [fill] Final match for {char_name} with sim: {best_sim:.4f}")
-            nx1, ny1, nx2, ny2 = get_crop_coords(original_img, best_match)
-            
-            # Parse color_bgr string "(b,g,r)"
-            color_str = char['color_bgr'].strip('()')
-            b, g, r = map(int, color_str.split(','))
-            color_bgr = (b, g, r)
-            
-            # Draw SOLID rectangle on fill image (thickness = -1)
-            cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
-            # Fill mask
-            cv2.rectangle(mask, (nx1, ny1), (nx2, ny2), 255, -1)
+        print(f"    [fill] Final match for {char_db['character_name']} with sim: {sim:.4f}")
+        nx1, ny1, nx2, ny2 = get_crop_coords(original_img, face)
+        
+        # Parse color_bgr string "(b,g,r)"
+        color_str = char_db['color_bgr'].strip('()')
+        b, g, r = map(int, color_str.split(','))
+        color_bgr = (b, g, r)
+        
+        # Draw SOLID rectangle on fill image (thickness = -1)
+        cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
+        # Fill mask
+        cv2.rectangle(mask, (nx1, ny1), (nx2, ny2), 255, -1)
     # Encode result
     _, buffer = cv2.imencode('.png', fill_img)
     return StreamingResponse(BytesIO(buffer), media_type="image/png")
