@@ -53,10 +53,28 @@ def init_db():
                 ny1 INTEGER,
                 nx2 INTEGER,
                 ny2 INTEGER,
-                created_at TIMESTAMPTZ DEFAULT NOW(),
-                UNIQUE(user_email, project_id, character_name)
+                created_at TIMESTAMPTZ DEFAULT NOW()
             );
         """)
+        
+        # Drop the old constraint and add the new one
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'character_colors_user_email_project_id_character_name_key'
+                ) THEN
+                    ALTER TABLE character_colors DROP CONSTRAINT character_colors_user_email_project_id_character_name_key;
+                END IF;
+                
+                IF NOT EXISTS (
+                    SELECT 1 FROM pg_constraint WHERE conname = 'character_colors_unique_grid'
+                ) THEN
+                    ALTER TABLE character_colors ADD CONSTRAINT character_colors_unique_grid UNIQUE(user_email, project_id, character_name, storyboard_number, grid_number);
+                END IF;
+            END $$;
+        """)
+        
         # Add new columns if they don't exist
         cur.execute("""
             DO $$ 
@@ -104,34 +122,51 @@ def record_character_color(user_email, project_id, character_name, embedding=Non
     conn = get_db_connection()
     cur = conn.cursor()
     try:
-        # Check if already exists
+        # Check if character already has a color assigned in this project (from any grid)
         cur.execute(f"""
             SELECT color_name, color_hex, color_bgr FROM {table_name} 
             WHERE user_email = %s AND project_id = %s AND character_name = %s
+            LIMIT 1
         """, (user_email, project_id, character_name))
-        existing = cur.fetchone()
-        if existing:
-            return existing
+        existing_color = cur.fetchone()
+        
+        if existing_color:
+            color_name = existing_color['color_name']
+            color_hex = existing_color['color_hex']
+            color_bgr = existing_color['color_bgr']
+        else:
+            # Get count of DISTINCT characters for this project to determine next color
+            cur.execute(f"""
+                SELECT COUNT(DISTINCT character_name) FROM {table_name} 
+                WHERE user_email = %s AND project_id = %s
+            """, (user_email, project_id))
+            count = cur.fetchone()['count']
+            
+            color_idx = count % len(COLOR_PALETTE)
+            color = COLOR_PALETTE[color_idx]
+            
+            color_name = color['name']
+            color_hex = color['hex']
+            color_bgr = f"({color['bgr'][0]},{color['bgr'][1]},{color['bgr'][2]})"
 
-        # Get count of characters for this project to determine next color
+        # Upsert the record for this specific grid
         cur.execute(f"""
-            SELECT COUNT(*) FROM {table_name} 
-            WHERE user_email = %s AND project_id = %s
-        """, (user_email, project_id))
-        count = cur.fetchone()['count']
-        
-        color_idx = count % len(COLOR_PALETTE)
-        color = COLOR_PALETTE[color_idx]
-        
-        bgr_str = f"({color['bgr'][0]},{color['bgr'][1]},{color['bgr'][2]})"
-        
-        cur.execute(f"""
-            INSERT INTO {table_name} (user_email, project_id, character_name, color_name, color_hex, color_bgr, embedding, storyboard_number, grid_number, nx1, ny1, nx2, ny2)
+            INSERT INTO {table_name} (
+                user_email, project_id, character_name, color_name, color_hex, color_bgr, 
+                embedding, storyboard_number, grid_number, nx1, ny1, nx2, ny2
+            )
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT ON CONSTRAINT character_colors_unique_grid
+            DO UPDATE SET 
+                embedding = EXCLUDED.embedding,
+                nx1 = EXCLUDED.nx1,
+                ny1 = EXCLUDED.ny1,
+                nx2 = EXCLUDED.nx2,
+                ny2 = EXCLUDED.ny2
             RETURNING color_name, color_hex, color_bgr
         """, (
             user_email, project_id, character_name, 
-            color['name'], color['hex'], bgr_str, 
+            color_name, color_hex, color_bgr, 
             embedding.tolist() if embedding is not None else None,
             storyboard_number, grid_number,
             nx1, ny1, nx2, ny2

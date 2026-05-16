@@ -15,3 +15,12 @@ wheels/
 character/
 crops/
 original/
+
+# IDEs
+.vscode/
+.idea/
+.cursor/
+*.swp
+*.swo
+
+.DS_Store
