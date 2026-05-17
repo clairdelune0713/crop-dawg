@@ -8,7 +8,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import List
 import uvicorn
-from db import record_character_color, get_project_characters, clear_grid_characters
+from db import record_character_color, get_project_characters, clear_grid_characters, clear_detected_faces, record_detected_face, get_detected_faces, COLOR_PALETTE
 
 app = FastAPI(title="Face Head Cropper API")
 
@@ -102,6 +102,35 @@ def find_best_match(target_faces, ref_emb, label=""):
 def crop_head(img, face, padding=0.6):
     """Crops the head from the image based on the face bounding box."""
     nx1, ny1, nx2, ny2 = get_crop_coords(img, face, padding)
+    crop = img[ny1:ny2, nx1:nx2]
+    return crop
+
+def get_detect_faces_crop_coords(img, face, padding=0.6):
+    """Calculates the coordinates specifically for the detect-faces endpoint (narrower sides, less bottom)."""
+    h, w, _ = img.shape
+    bbox = face.bbox.astype(int)
+    
+    x1, y1, x2, y2 = bbox
+    fw = x2 - x1
+    fh = y2 - y1
+    
+    # Add padding
+    cx = (x1 + x2) // 2
+    cy = (y1 + y2) // 2
+    
+    # Head crop usually needs more top padding
+    side = max(fw, fh) * (1 + padding)
+    
+    nx1 = int(max(0, cx - side // 2 * 0.8))  # Narrower horizontal margin
+    ny1 = int(max(0, cy - side // 2 * 1.3))  # Shift up for head
+    nx2 = int(min(w, cx + side // 2 * 0.8))  # Narrower horizontal margin
+    ny2 = int(min(h, cy + side // 2 * 1.2))  # Crop less on the bottom (shoulders)
+    
+    return nx1, ny1, nx2, ny2
+
+def crop_head_detect_faces(img, face, padding=0.6):
+    """Crops the head from the image based on the face bounding box specifically for detect-faces."""
+    nx1, ny1, nx2, ny2 = get_detect_faces_crop_coords(img, face, padding)
     crop = img[ny1:ny2, nx1:nx2]
     return crop
 
@@ -511,6 +540,150 @@ async def clear_grid(
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/detect-faces")
+async def detect_faces(
+    original: UploadFile = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+):
+    """
+    Detects all faces in a single uploaded image, crops each face,
+    records their details and assigned colors in the database, 
+    and returns the cropped faces as base64 images along with a base64 encoded fill image.
+    """
+    try:
+        # Read original image
+        original_bytes = await original.read()
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise HTTPException(status_code=400, detail="Invalid original image")
+            
+        # 1. Detect all faces in original (Exhaustive)
+        unique_faces = get_unique_faces(original_img)
+        if not unique_faces:
+            raise HTTPException(status_code=404, detail="No faces detected in original photo")
+
+        # 2. Clear old detected faces for this user and project to prevent stale results
+        clear_detected_faces(user_email, project_id)
+
+        # 3. Generate Crops, save details in DB, draw colors on fill visualization, and encode to base64
+        results = []
+        fill_img = original_img.copy()
+        
+        valid_face_idx = 0
+        for face in unique_faces:
+            # Filter out extremely small faces (width or height < 40 pixels) to avoid false positives
+            bbox = face.bbox.astype(int)
+            fw = bbox[2] - bbox[0]
+            fh = bbox[3] - bbox[1]
+            if fw < 40 or fh < 40:
+                print(f"[detect-faces] Skipping tiny face candidate (false positive): bbox size {fw}x{fh}")
+                continue
+                
+            # Crop the head
+            cropped = crop_head_detect_faces(original_img, face)
+            _, buffer = cv2.imencode('.png', cropped)
+            base64_crop = base64.b64encode(buffer).decode('utf-8')
+            
+            # Coordinates
+            nx1, ny1, nx2, ny2 = get_detect_faces_crop_coords(original_img, face)
+            
+            # Color assignment
+            color_idx = valid_face_idx % len(COLOR_PALETTE)
+            color = COLOR_PALETTE[color_idx]
+            color_name = color['name']
+            color_hex = color['hex']
+            color_bgr = color['bgr']  # (b, g, r) tuple
+            color_bgr_str = f"({color_bgr[0]},{color_bgr[1]},{color_bgr[2]})"
+            
+            # Draw SOLID rectangle on fill image
+            cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
+            
+            # Record in DB
+            record_detected_face(
+                user_email=user_email,
+                project_id=project_id,
+                face_index=valid_face_idx,
+                color_name=color_name,
+                color_hex=color_hex,
+                color_bgr=color_bgr_str,
+                embedding=face.embedding,
+                nx1=int(nx1),
+                ny1=int(ny1),
+                nx2=int(nx2),
+                ny2=int(ny2)
+            )
+            
+            results.append({
+                "face_index": valid_face_idx,
+                "base64": base64_crop,
+                "color_name": color_name,
+                "color_hex": color_hex,
+                "coords": [int(nx1), int(ny1), int(nx2), int(ny2)]
+            })
+            
+            valid_face_idx += 1
+
+        # Encode the fill image as base64
+        _, fill_buffer = cv2.imencode('.png', fill_img)
+        base64_fill = base64.b64encode(fill_buffer).decode('utf-8')
+
+        return JSONResponse(content={
+            "success": True, 
+            "faces": results,
+            "fill_image": base64_fill
+        })
+
+    except Exception as e:
+        print(f"[detect-faces] Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/detect-faces-fill")
+async def get_detect_faces_fill(
+    original: UploadFile = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+):
+    """
+    Returns the original image with colored rectangles covering all detected faces for the given project.
+    """
+    # Read original image
+    try:
+        original_bytes = await original.read()
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise HTTPException(status_code=400, detail="Invalid original image")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error processing image: {str(e)}")
+
+    # Get all detected faces for this project
+    faces = get_detected_faces(user_email, project_id)
+    
+    if not faces:
+        # Return original image if no faces found
+        _, buffer = cv2.imencode('.png', original_img)
+        return StreamingResponse(BytesIO(buffer), media_type="image/png")
+
+    fill_img = original_img.copy()
+    
+    print(f"Generating fill image for {len(faces)} detected faces...")
+    for face in faces:
+        nx1, ny1, nx2, ny2 = face['nx1'], face['ny1'], face['nx2'], face['ny2']
+        
+        # Parse color_bgr string "(b,g,r)"
+        color_str = face['color_bgr'].strip('()')
+        b, g, r = map(int, color_str.split(','))
+        color_bgr = (b, g, r)
+        
+        # Draw SOLID rectangle on fill image
+        cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
+
+    # Encode result
+    _, buffer = cv2.imencode('.png', fill_img)
+    return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

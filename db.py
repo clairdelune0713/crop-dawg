@@ -102,6 +102,40 @@ def init_db():
                 END IF;
             END $$;
         """)
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS detected_faces (
+                id SERIAL PRIMARY KEY,
+                user_email TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                face_index INTEGER NOT NULL,
+                color_name TEXT,
+                color_hex TEXT,
+                color_bgr TEXT,
+                embedding FLOAT[],
+                nx1 INTEGER,
+                ny1 INTEGER,
+                nx2 INTEGER,
+                ny2 INTEGER,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+        """)
+        
+        # Add color columns if they don't exist
+        cur.execute("""
+            DO $$ 
+            BEGIN 
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='detected_faces' AND column_name='color_name') THEN
+                    ALTER TABLE detected_faces ADD COLUMN color_name TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='detected_faces' AND column_name='color_hex') THEN
+                    ALTER TABLE detected_faces ADD COLUMN color_hex TEXT;
+                END IF;
+                IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='detected_faces' AND column_name='color_bgr') THEN
+                    ALTER TABLE detected_faces ADD COLUMN color_bgr TEXT;
+                END IF;
+            END $$;
+        """)
         conn.commit()
     finally:
         cur.close()
@@ -227,6 +261,67 @@ def clear_grid_characters(user_email, project_id, storyboard_number, grid_number
         conn.commit()
         print(f"[DB] Deleted {count} stale character records.")
         return True
+    finally:
+        cur.close()
+        conn.close()
+
+def clear_detected_faces(user_email, project_id):
+    """Deletes all detected faces for a specific user and project."""
+    init_db()
+    print(f"[DB] Clearing detected faces for {user_email}/{project_id}")
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            DELETE FROM detected_faces
+            WHERE user_email = %s AND project_id = %s
+        """, (user_email, project_id))
+        count = cur.rowcount
+        conn.commit()
+        print(f"[DB] Deleted {count} stale detected face records.")
+        return True
+    finally:
+        cur.close()
+        conn.close()
+
+def record_detected_face(user_email, project_id, face_index, color_name, color_hex, color_bgr, embedding, nx1, ny1, nx2, ny2):
+    """Records a single detected face."""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            INSERT INTO detected_faces (
+                user_email, project_id, face_index, color_name, color_hex, color_bgr, embedding, nx1, ny1, nx2, ny2
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            user_email, project_id, face_index, color_name, color_hex, color_bgr,
+            embedding.tolist() if embedding is not None else None,
+            nx1, ny1, nx2, ny2
+        ))
+        result = cur.fetchone()
+        conn.commit()
+        return result['id'] if result else None
+    finally:
+        cur.close()
+        conn.close()
+
+def get_detected_faces(user_email, project_id):
+    """Retrieves all detected faces for a specific project."""
+    if not user_email or not project_id:
+        return []
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT face_index, color_name, color_hex, color_bgr, embedding, nx1, ny1, nx2, ny2
+            FROM detected_faces
+            WHERE user_email = %s AND project_id = %s
+            ORDER BY face_index ASC
+        """, (user_email, project_id))
+        return cur.fetchall()
     finally:
         cur.close()
         conn.close()

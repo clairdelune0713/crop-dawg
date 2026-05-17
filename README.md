@@ -120,6 +120,69 @@ curl -X POST "http://localhost:8000/fill-image" \
   --output fill_status.png
 ```
 
+### 3. Detect All Faces
+**Endpoint**: `POST /detect-faces`
+
+Detects all unique faces in a single long-shot image, crops them individually, automatically records them and their assigned aesthetic colors in the database (under the new `detected_faces` table), and returns both individual base64-encoded crops and a base64-encoded visualizer image overlaying all detected faces.
+
+**Request (Multipart/Form-Data)**:
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `original` | File | The original long-shot image (JPG, PNG, WebP). |
+| `user_email` | String | (Required) User email. |
+| `project_id` | String | (Required) Project ID. |
+
+**Response (JSON)**:
+- **Success (200)**: Returns a JSON object with `"success": true`, a `"faces"` array containing base64 crops/metadata, and `"fill_image"` containing a base64 encoded fill visualization.
+  ```json
+  {
+    "success": true,
+    "faces": [
+      {
+        "face_index": 0,
+        "base64": "...(base64 encoded png crop)...",
+        "color_name": "red",
+        "color_hex": "#FF0000",
+        "coords": [189, 105, 374, 395]
+      },
+      ...
+    ],
+    "fill_image": "...(base64 encoded full color-fill visualizer image)..."
+  }
+  ```
+
+**Example using `curl`**:
+```bash
+curl -X POST "http://localhost:8000/detect-faces" \
+  -F "original=@original/all.png" \
+  -F "user_email=test@example.com" \
+  -F "project_id=project_001"
+```
+
+### 4. Get Detected Faces Fill Image
+**Endpoint**: `POST /detect-faces-fill`
+
+Returns a color-filled visualization image covering all detected faces for the given project. This endpoint streams the PNG image directly.
+
+**Request (Multipart/Form-Data)**:
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `original` | File | The original long-shot image. |
+| `user_email` | String | (Required) User email. |
+| `project_id` | String | (Required) Project ID. |
+
+**Response**:
+- **Success (200)**: Streams the visualizer PNG image directly.
+
+**Example using `curl`**:
+```bash
+curl -X POST "http://localhost:8000/detect-faces-fill" \
+  -F "original=@original/all.png" \
+  -F "user_email=test@example.com" \
+  -F "project_id=project_001" \
+  --output detect_faces_fill.png
+```
+
 ---
 
 ## Local Script Usage (CLI)

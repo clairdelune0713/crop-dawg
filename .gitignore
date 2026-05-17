@@ -15,6 +15,7 @@ wheels/
 character/
 crops/
 original/
+output/
 
 # IDEs
 .vscode/
