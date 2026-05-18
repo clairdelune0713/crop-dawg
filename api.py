@@ -550,7 +550,7 @@ async def detect_faces(
     """
     Detects all faces in a single uploaded image, crops each face,
     records their details and assigned colors in the database, 
-    and returns the cropped faces as base64 images along with a base64 encoded fill image.
+    and returns the cropped faces as base64 images.
     """
     try:
         # Read original image
@@ -568,9 +568,8 @@ async def detect_faces(
         # 2. Clear old detected faces for this user and project to prevent stale results
         clear_detected_faces(user_email, project_id)
 
-        # 3. Generate Crops, save details in DB, draw colors on fill visualization, and encode to base64
+        # 3. Generate Crops, save details in DB, and encode to base64
         results = []
-        fill_img = original_img.copy()
         
         valid_face_idx = 0
         for face in unique_faces:
@@ -598,9 +597,6 @@ async def detect_faces(
             color_bgr = color['bgr']  # (b, g, r) tuple
             color_bgr_str = f"({color_bgr[0]},{color_bgr[1]},{color_bgr[2]})"
             
-            # Draw SOLID rectangle on fill image
-            cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
-            
             # Record in DB
             record_detected_face(
                 user_email=user_email,
@@ -626,14 +622,9 @@ async def detect_faces(
             
             valid_face_idx += 1
 
-        # Encode the fill image as base64
-        _, fill_buffer = cv2.imencode('.png', fill_img)
-        base64_fill = base64.b64encode(fill_buffer).decode('utf-8')
-
         return JSONResponse(content={
             "success": True, 
-            "faces": results,
-            "fill_image": base64_fill
+            "faces": results
         })
 
     except Exception as e:
@@ -645,9 +636,11 @@ async def get_detect_faces_fill(
     original: UploadFile = File(...),
     user_email: str = Form(...),
     project_id: str = Form(...),
+    colors: List[str] = Form(None),
 ):
     """
-    Returns the original image with colored rectangles covering all detected faces for the given project.
+    Returns the original image with colored rectangles covering matching/all detected faces for the given project.
+    If 'colors' parameter (list of color names or hex codes) is provided, only those matching faces are filled.
     """
     # Read original image
     try:
@@ -669,8 +662,25 @@ async def get_detect_faces_fill(
 
     fill_img = original_img.copy()
     
+    # Parse target colors if provided
+    target_colors = None
+    if colors:
+        target_colors = set()
+        for color_item in colors:
+            for c in color_item.split(','):
+                c_clean = c.strip().lower()
+                if c_clean:
+                    target_colors.add(c_clean)
+
     print(f"Generating fill image for {len(faces)} detected faces...")
     for face in faces:
+        # If target_colors is provided, only fill the faces that match
+        if target_colors:
+            face_color_name = face.get('color_name', '').strip().lower()
+            face_color_hex = face.get('color_hex', '').strip().lower()
+            if face_color_name not in target_colors and face_color_hex not in target_colors:
+                continue
+
         nx1, ny1, nx2, ny2 = face['nx1'], face['ny1'], face['nx2'], face['ny2']
         
         # Parse color_bgr string "(b,g,r)"
