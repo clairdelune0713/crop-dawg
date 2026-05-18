@@ -695,5 +695,82 @@ async def get_detect_faces_fill(
     _, buffer = cv2.imencode('.png', fill_img)
     return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
+@app.post("/crop-manual")
+async def crop_manual(
+    original: UploadFile = File(...),
+    user_email: str = Form(...),
+    project_id: str = Form(...),
+    assignments: str = Form(...),  # JSON string of [{"character_name": "...", "face_index": 0}]
+    table_name: str = Form("character_colors")
+):
+    import json
+    try:
+        # Read original image
+        original_bytes = await original.read()
+        nparr_orig = np.frombuffer(original_bytes, np.uint8)
+        original_img = cv2.imdecode(nparr_orig, cv2.IMREAD_COLOR)
+        if original_img is None:
+            raise HTTPException(status_code=400, detail="Invalid original image")
+
+        # Parse assignments
+        try:
+            assignment_list = json.loads(assignments)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid assignments JSON: {str(e)}")
+
+        # Fetch all detected faces to map face_index to coordinates and embedding
+        detected_faces = get_detected_faces(user_email, project_id)
+        detected_faces_map = {f['face_index']: f for f in detected_faces}
+
+        # Clear old character colors for this specific grid (storyboard=0, grid=0) to prevent duplicates
+        clear_grid_characters(user_email, project_id, 0, 0, table_name=table_name)
+
+        crops_result = {}
+
+        for mapping in assignment_list:
+            char_name = mapping.get("character_name")
+            face_index = mapping.get("face_index")
+            if char_name is None or face_index is None:
+                continue
+
+            face = detected_faces_map.get(face_index)
+            if not face:
+                print(f"[crop-manual] Stale face_index {face_index} not found in DB. Skipping.")
+                continue
+
+            nx1, ny1, nx2, ny2 = face['nx1'], face['ny1'], face['nx2'], face['ny2']
+            emb_list = face['embedding']
+            emb_arr = np.array(emb_list) if emb_list else None
+
+            # Crop the head directly using the exact coordinates from the face detection
+            crop = original_img[ny1:ny2, nx1:nx2]
+            _, buffer = cv2.imencode('.png', crop)
+            base64_crop = base64.b64encode(buffer).decode('utf-8')
+
+            # Record in character_colors mapping table
+            record_character_color(
+                user_email=user_email,
+                project_id=project_id,
+                character_name=char_name,
+                embedding=emb_arr,
+                storyboard_number=0,
+                grid_number=0,
+                nx1=int(nx1),
+                ny1=int(ny1),
+                nx2=int(nx2),
+                ny2=int(ny2),
+                table_name=table_name
+            )
+
+            crops_result[char_name] = {
+                "base64": base64_crop,
+                "coords": [int(nx1), int(ny1), int(nx2), int(ny2)]
+            }
+
+        return JSONResponse(content={"success": True, "crops": crops_result})
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
