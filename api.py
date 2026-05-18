@@ -487,33 +487,19 @@ async def get_fill_image(
         _, buffer = cv2.imencode('.png', original_img)
         return StreamingResponse(BytesIO(buffer), media_type="image/png")
 
-    # Detect faces once using the unified multi-scale logic
-    unique_faces = get_unique_faces(original_img)
-    
     fill_img = original_img.copy()
-    mask = np.zeros(original_img.shape[:2], dtype=np.uint8)
-    threshold = 0.25
-
-    # Build character data from DB records
-    char_data = []
-    for char in characters:
-        char_data.append({
-            "name": char['character_name'],
-            "emb": np.array(char['embedding'])
-        })
-
-    # Solve assignment globally
-    assignment, total_score, sim_matrix = solve_assignments(char_data, unique_faces, threshold=threshold)
-
-    print(f"Generating fill image for {len(characters)} characters...")
-    for char_idx, face_idx in assignment.items():
-        char_db = characters[char_idx]
-        face = unique_faces[face_idx]
-        sim = sim_matrix[char_idx][face_idx]
+    
+    print(f"Generating fill image for {len(characters)} characters using DB coordinates...")
+    for char_db in characters:
+        nx1 = char_db.get('nx1')
+        ny1 = char_db.get('ny1')
+        nx2 = char_db.get('nx2')
+        ny2 = char_db.get('ny2')
         
-        print(f"    [fill] Final match for {char_db['character_name']} with sim: {sim:.4f}")
-        nx1, ny1, nx2, ny2 = get_crop_coords(original_img, face)
-        
+        if None in (nx1, ny1, nx2, ny2):
+            print(f"    [fill] Character {char_db['character_name']} has no coordinates in DB. Skipping.")
+            continue
+            
         # Parse color_bgr string "(b,g,r)"
         color_str = char_db['color_bgr'].strip('()')
         b, g, r = map(int, color_str.split(','))
@@ -521,8 +507,7 @@ async def get_fill_image(
         
         # Draw SOLID rectangle on fill image (thickness = -1)
         cv2.rectangle(fill_img, (nx1, ny1), (nx2, ny2), color_bgr, -1)
-        # Fill mask
-        cv2.rectangle(mask, (nx1, ny1), (nx2, ny2), 255, -1)
+
     # Encode result
     _, buffer = cv2.imencode('.png', fill_img)
     return StreamingResponse(BytesIO(buffer), media_type="image/png")
